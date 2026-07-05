@@ -1,0 +1,1674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>UA Command Center — Quarterly Performance & Budget Planner</title>
+
+<!-- ============================================================
+     STACK (all CDN, zero backend):
+       React 18 + ReactDOM  — UI
+       Babel Standalone     — in-browser JSX compilation
+       Tailwind CSS         — styling (Tremor-style aesthetic)
+       PapaParse            — robust CSV parsing
+       Recharts             — charts (UMD build, uses global React)
+     ============================================================ -->
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+
+<style>
+  body { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .tabular { font-variant-numeric: tabular-nums; }
+  ::-webkit-scrollbar { height: 8px; width: 8px; }
+  ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 4px; }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-900 antialiased">
+<div id="root"></div>
+
+<script type="text/babel" data-presets="env,react">
+"use strict";
+
+const { useState, useMemo, useCallback, useRef } = React;
+const {
+  ResponsiveContainer, ComposedChart, BarChart, LineChart, Bar, Line,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, Cell, ReferenceLine, LabelList
+} = Recharts;
+
+/* ================================================================
+   SECTION 0 — CONFIGURATION
+   Every judgment threshold lives here, documented, so the logic is
+   auditable and tunable. Nothing below hardcodes campaign names or
+   this quarter's numbers — drop in next quarter's CSV and the same
+   rules re-derive every verdict.
+   ================================================================ */
+const CONFIG = {
+  MONTHLY_BUDGET: 50000,          // $/month to allocate next quarter
+
+  // --- Signal trust (statistical significance) -------------------
+  // Margin of error on per-install economics ≈ 1.96/√installs
+  // (assumes coefficient of variation ≈ 1 on revenue-per-install,
+  // a conservative default for freemium-style revenue).
+  TRUST: {
+    HIGH:   { minSpend: 2000, maxMoe: 0.10 },  // ≥$2k spend & ±10% → decision-grade
+    MEDIUM: { minSpend: 500,  maxMoe: 0.20 },  // ≥$500 & ±20% → directional
+    // anything weaker is LOW: never scaled or cut on its own numbers
+  },
+
+  // --- Cohort maturity -------------------------------------------
+  // A cohort younger than 30 days cannot have observed D30 revenue.
+  // Missing D30 on those rows is EXPECTED, not dirty data; we project
+  // it with the portfolio's matured D30/D7 revenue multiplier.
+  MATURITY_DAYS: 30,
+  MIN_MATURE_REV7_FOR_CAMPAIGN_MULT: 500, // $ of matured D7 rev needed to trust a campaign-specific multiplier
+
+  // --- Performance baselines (color coding + verdicts) -----------
+  // Break-even = 100% D30 ROAS. Below ~40% projected D30 ROAS a
+  // campaign needs >2.5× revenue growth after D30 to ever pay back —
+  // rarely credible; below 25% it is a capital incinerator.
+  ROAS30: { scale: 1.00, maintain: 0.40, reduce: 0.25 }, // tier cutoffs (fractions)
+  CPI_TARGET: 2.50,       // $ — green below, red above 1.5×
+  CTR_TARGET: 0.02,       // 2% — typical UA benchmark
+  D7RET_TARGET: 0.12,     // 12% D7 retention — healthy mobile baseline
+
+  // --- Budget allocator ------------------------------------------
+  SCALE_CAP_X: 2.0,       // scaled campaigns: ≤2× historical monthly spend (avoid efficiency cliff)
+  MAINTAIN_CAP_X: 1.0,    // maintained: ≤1× historical
+  REDUCE_CAP_X: 0.5,      // reduced: ≤0.5× historical
+  MIN_VIABLE_MONTHLY: 2000, // $/mo — allocations below this can't produce signal; consolidate instead
+
+  // --- Demand-capture ceiling -------------------------------------
+  // Brand search & retargeting campaigns HARVEST demand created
+  // elsewhere (organic brand queries, the retargeting pool). Their
+  // inventory is bounded, so their ROAS does not survive scaling:
+  // extra budget buys broader query matches and stale pool segments.
+  // They are funded FIRST, at no more than historical volume; every
+  // remaining dollar flows to prospecting, which creates the
+  // top-of-funnel demand that keeps the ecosystem alive.
+  DEMAND_CAPTURE_REGEX: /brand|retarget/i, // matched against campaign name
+  DEMAND_CAPTURE_CAP_X: 1.0,               // hard ceiling: 1× historical monthly spend
+
+  // --- Guardrails for the 30/60/90-day revisit plan ---------------
+  GUARD: { cpiDriftX: 1.25, roasFloorX: 0.80, multiplierTolerance: 0.20 },
+
+  // --- Creative Library (Part 2) -----------------------------------
+  CREATIVE: {
+    THUMBSTOP_TARGET: 0.25,  // ≥25% 3s thumbstop = strong hook (short-form video norm)
+    HOLD15_TARGET: 0.10,     // ≥10% still watching at 15s = holds attention
+    MIN_TAG_SPEND: 300,      // $ a tag-group needs before its averages are quoted in insights
+    MIN_REL_GAP: 0.15,       // 15% relative gap before a comparative insight fires
+  },
+};
+
+/* ================================================================
+   CREATIVE TAG DB — output of the multimodal AI tagging pipeline
+   (Part 2, Task 1.1). Each uploaded creative-performance CSV is
+   inner-joined against this taxonomy on creative_id.
+   ================================================================ */
+const creativeTagsDB = [
+  {"creative_id": "CR-001", "promoted_product": "kitUP", "language": "Mixed", "hook_type": "Native_UI_Mimicry", "visual_format": "Motion_Graphics", "pacing": "Static", "text_overlays": "Static_Headline", "cta_type": "Implicit_None", "cta_timing": "Throughout", "core_tone": "Curiosity_Intrigue", "native_feel_score": "Semi_Native"},
+  {"creative_id": "CR-002", "promoted_product": "kitUP", "language": "AR", "hook_type": "Native_UI_Mimicry", "visual_format": "Motion_Graphics", "pacing": "Static", "text_overlays": "Native_UI_Text", "cta_type": "Interactive_Prompt", "cta_timing": "End_Card", "core_tone": "Aspirational", "native_feel_score": "Semi_Native"},
+  {"creative_id": "CR-003", "promoted_product": "kitUP", "language": "TR", "hook_type": "Bold_Claim_Stat", "visual_format": "Motion_Graphics", "pacing": "Static", "text_overlays": "Static_Headline", "cta_type": "Implicit_None", "cta_timing": "Throughout", "core_tone": "Aspirational", "native_feel_score": "Semi_Native"},
+  {"creative_id": "CR-004", "promoted_product": "kitUP", "language": "RU", "hook_type": "Direct_Address", "visual_format": "Screen_Rec_Plus_VO", "pacing": "Medium", "text_overlays": "Dynamic_Captions", "cta_type": "Interactive_Prompt", "cta_timing": "End_Card", "core_tone": "Authority_Proof", "native_feel_score": "Semi_Native"},
+  {"creative_id": "CR-005", "promoted_product": "kitUP", "language": "TR", "hook_type": "Shock_Warning", "visual_format": "Static_Image_Ad", "pacing": "Static", "text_overlays": "Static_Headline", "cta_type": "Offer_Led", "cta_timing": "End_Card", "core_tone": "Emotional_Empathy", "native_feel_score": "Obvious_Ad"},
+  {"creative_id": "CR-006", "promoted_product": "Language_App", "language": "Mixed", "hook_type": "Direct_Address", "visual_format": "AI_Avatar_UGC", "pacing": "Slow", "text_overlays": "Dynamic_Captions", "cta_type": "Direct_Download", "cta_timing": "Mid", "core_tone": "Aspirational", "native_feel_score": "Semi_Native"},
+  {"creative_id": "CR-007", "promoted_product": "kitUP", "language": "RU", "hook_type": "Bold_Claim_Stat", "visual_format": "Screen_Rec_Plus_VO", "pacing": "Medium", "text_overlays": "Dynamic_Captions", "cta_type": "Interactive_Prompt", "cta_timing": "End_Card", "core_tone": "Authority_Proof", "native_feel_score": "Semi_Native"},
+  {"creative_id": "CR-008", "promoted_product": "Language_App", "language": "Mixed", "hook_type": "Result_First", "visual_format": "Motion_Graphics", "pacing": "Slow", "text_overlays": "Native_UI_Text", "cta_type": "Implicit_None", "cta_timing": "End_Card", "core_tone": "Educational", "native_feel_score": "Semi_Native"},
+  {"creative_id": "CR-009", "promoted_product": "kitUP", "language": "TR", "hook_type": "Problem_Callout", "visual_format": "UGC_Talking_Head", "pacing": "Medium", "text_overlays": "Dynamic_Captions", "cta_type": "Interactive_Prompt", "cta_timing": "End_Card", "core_tone": "Authority_Proof", "native_feel_score": "Semi_Native"},
+  {"creative_id": "CR-010", "promoted_product": "AI_Video_Gen", "language": "EN", "hook_type": "Result_First", "visual_format": "AI_Generated_Full", "pacing": "Fast", "text_overlays": "Dynamic_Captions", "cta_type": "Direct_Download", "cta_timing": "End_Card", "core_tone": "Satisfying_ASMR", "native_feel_score": "Semi_Native"},
+  {"creative_id": "CR-011", "promoted_product": "IQTEST360", "language": "EN", "hook_type": "Provocative_Question", "visual_format": "Static_Image_Ad", "pacing": "Static", "text_overlays": "Static_Headline", "cta_type": "Interactive_Prompt", "cta_timing": "End_Card", "core_tone": "Competitive_Ego", "native_feel_score": "Obvious_Ad"},
+  {"creative_id": "CR-012", "promoted_product": "AI_Video_Gen", "language": "EN", "hook_type": "Pattern_Interrupt_Visual", "visual_format": "UGC_Talking_Head", "pacing": "Medium", "text_overlays": "Dynamic_Captions", "cta_type": "Direct_Download", "cta_timing": "End_Card", "core_tone": "Curiosity_Intrigue", "native_feel_score": "Fully_Native"},
+];
+
+const REQUIRED_COLUMNS = [
+  "date","channel","campaign","adset","attribution_window","spend_usd",
+  "impressions","clicks","installs","cpi_usd","d1_retention","d7_retention",
+  "d30_retention","revenue_d7_usd","revenue_d30_usd","revenue_currency"
+];
+
+/* ================================================================
+   SECTION 1 — FORMATTERS & SMALL UTILITIES
+   ================================================================ */
+const usd  = (v, d=0) => v == null || isNaN(v) ? "—" : (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString("en-US",{minimumFractionDigits:d, maximumFractionDigits:d});
+const pct  = (v, d=1) => v == null || isNaN(v) ? "—" : (v*100).toFixed(d) + "%";
+const num  = (v) => v == null || isNaN(v) ? "—" : Math.round(v).toLocaleString("en-US");
+const safeDiv = (a, b) => (b > 0 ? a / b : null);
+const parseNum = (v) => { if (v === "" || v == null) return null; const n = +v; return isNaN(n) ? null : n; };
+const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000);
+
+/* ================================================================
+   SECTION 2 — CLEANING & AUDIT PIPELINE
+   Takes raw PapaParse rows, returns { rows, audit, meta }.
+   Every rule ALWAYS emits an audit entry (even when it caught
+   nothing) so the user sees exactly which checks ran.
+   ================================================================ */
+function cleanData(rawRows, parseErrors) {
+  const audit = [];
+  const log = (severity, title, count, action, detail, samples=[]) =>
+    audit.push({ severity, title, count, action, detail, samples });
+
+  // -- Rule 0: schema -----------------------------------------------------
+  const cols = rawRows.length ? Object.keys(rawRows[0]) : [];
+  const missing = REQUIRED_COLUMNS.filter(c => !cols.includes(c));
+  if (missing.length) {
+    return { fatal: `CSV is missing required column(s): ${missing.join(", ")}. Expected schema: ${REQUIRED_COLUMNS.join(", ")}` };
+  }
+  log("info", "Schema validation", 0, "passed", `All ${REQUIRED_COLUMNS.length} required columns present. ${rawRows.length.toLocaleString()} data rows received.`);
+
+  if (parseErrors && parseErrors.length) {
+    log("warn", "CSV parse errors", parseErrors.length, "rows skipped by parser",
+        "PapaParse reported malformed rows (wrong field count / bad quoting).",
+        parseErrors.slice(0,3).map(e => `row ${e.row}: ${e.message}`));
+  }
+
+  // -- Type coercion (we NEVER trust pre-computed columns like cpi_usd;
+  //    all derived metrics are recomputed from raw counts) ---------------
+  let rows = rawRows.map((r, i) => ({
+    _row: i + 2, // 1-based + header, for audit readability
+    date: (r.date || "").trim(),
+    channel: (r.channel || "").trim(),
+    campaign: (r.campaign || "").trim(),
+    adset: (r.adset || "").trim(),
+    attribution_window: (r.attribution_window || "").trim(),
+    currency: (r.revenue_currency || "").trim(),
+    spend: parseNum(r.spend_usd),
+    impressions: parseNum(r.impressions),
+    clicks: parseNum(r.clicks),
+    installs: parseNum(r.installs),
+    cpiReported: parseNum(r.cpi_usd),
+    d1: parseNum(r.d1_retention),
+    d7: parseNum(r.d7_retention),
+    d30: parseNum(r.d30_retention),
+    rev7: parseNum(r.revenue_d7_usd),
+    rev30: parseNum(r.revenue_d30_usd), // null = missing (maybe immature)
+  }));
+
+  // -- Rule 1: structurally invalid rows ---------------------------------
+  const isValid = r =>
+    /^\d{4}-\d{2}-\d{2}$/.test(r.date) && r.channel && r.campaign && r.adset &&
+    r.spend != null && r.impressions != null && r.clicks != null && r.installs != null;
+  const invalid = rows.filter(r => !isValid(r));
+  rows = rows.filter(isValid);
+  log(invalid.length ? "warn" : "info", "Structural validity (date format, ids, numeric core fields)",
+      invalid.length, invalid.length ? "excluded" : "passed",
+      "Rows missing a parseable date, channel/campaign/adset id, or numeric spend/impressions/clicks/installs cannot be attributed and are removed.",
+      invalid.slice(0,3).map(r => `row ${r._row}: date="${r.date}" channel="${r.channel}"`));
+
+  // -- Rule 2: exact duplicates (same date+adset, identical values) ------
+  const seen = new Map(); const dupes = []; const conflicts = [];
+  rows = rows.filter(r => {
+    const key = `${r.date}|${r.adset}`;
+    const sig = JSON.stringify([r.spend, r.impressions, r.clicks, r.installs, r.rev7, r.rev30]);
+    if (!seen.has(key)) { seen.set(key, sig); return true; }
+    (seen.get(key) === sig ? dupes : conflicts).push(r);
+    return false; // keep first occurrence either way
+  });
+  log(dupes.length ? "warn" : "info", "Duplicate date+adset rows (identical values)",
+      dupes.length, dupes.length ? "deduplicated (kept first)" : "none found",
+      "Exact duplicates double-count spend and installs — a classic export/ETL replay artifact.",
+      dupes.slice(0,3).map(r => `${r.date} ${r.adset} (spend ${usd(r.spend,2)})`));
+  log(conflicts.length ? "error" : "info", "Conflicting duplicates (same date+adset, different values)",
+      conflicts.length, conflicts.length ? "kept first occurrence — verify export" : "none found",
+      "Same key with different numbers means two sources disagree; this needs a human look at the export pipeline.",
+      conflicts.slice(0,3).map(r => `${r.date} ${r.adset}`));
+
+  // -- Rule 3: negative spend = refund/clawback credits -------------------
+  const refunds = rows.filter(r => r.spend < 0);
+  rows = rows.filter(r => r.spend >= 0);
+  const refundTotal = refunds.reduce((a, r) => a + r.spend, 0);
+  log(refunds.length ? "warn" : "info", "Negative spend rows (platform refunds / invalid-traffic credits)",
+      refunds.length, refunds.length ? `excluded from performance math; ${usd(Math.abs(refundTotal),0)} credit noted` : "none found",
+      "Refund credits are real money but poison rate metrics (negative CPI, infinite ROAS). They are tracked as a separate credit line, not as performance.",
+      refunds.slice(0,4).map(r => `${r.date} ${r.adset}: ${usd(r.spend,2)}`));
+
+  // -- Rule 4: $0 spend with >0 installs (delayed/misattributed) ----------
+  const ghost = rows.filter(r => r.spend === 0 && r.installs > 0);
+  rows = rows.filter(r => !(r.spend === 0 && r.installs > 0));
+  log(ghost.length ? "warn" : "info", "$0 spend with >0 installs (delayed attribution)",
+      ghost.length, ghost.length ? "excluded" : "none found",
+      "Installs with no matching spend usually landed in the wrong day's row; including them deflates CPI artificially.");
+
+  // -- Rule 4b: spend with ZERO installs = tracking/attribution outage -----
+  // Money left the account but the MMP recorded nothing. Especially when
+  // clustered on consecutive dates within one campaign, this is a postback
+  // outage, not a campaign collapse. The spend is real (kept as a separate
+  // "wasted/outage" financial line) but the rows would poison every rate
+  // metric (infinite CPI, 0% CVR, 0% ROAS), so they are excluded from all
+  // CPI/CVR/ROAS/retention math.
+  const outage = rows.filter(r => r.spend > 0 && r.installs === 0);
+  rows = rows.filter(r => !(r.spend > 0 && r.installs === 0));
+  const outageSpend = outage.reduce((a, r) => a + r.spend, 0);
+  const outageByCampaign = {};
+  outage.forEach(r => { outageByCampaign[r.campaign] = (outageByCampaign[r.campaign] || 0) + 1; });
+  const outageDates = [...new Set(outage.map(r => r.date))].sort();
+  log(outage.length ? "warn" : "info", "Tracking outage: spend > $0 with 0 installs",
+      outage.length,
+      outage.length ? `${usd(outageSpend,0)} logged as Wasted/Outage Spend; rows excluded from ALL rate metrics (CPI, CVR, ROAS, retention)` : "none found",
+      "Attribution outages punish a campaign's historical metrics for a measurement failure, not a performance failure. The spend stays in the financial ledger; the rows stay out of the averages." +
+      (outage.length ? ` Affected: ${Object.entries(outageByCampaign).map(([c, n]) => `${c} (${n} rows)`).join(", ")}, spanning ${outageDates[0]} → ${outageDates[outageDates.length - 1]}${outageDates.length <= 10 ? " — a contiguous cluster, consistent with a postback outage rather than random tracking loss" : ""}.` : ""),
+      outage.slice(0, 4).map(r => `${r.date} ${r.adset}: ${usd(r.spend,2)} spend, 0 installs`));
+
+  // -- Rule 5: broken funnel (clicks>impressions or installs>clicks) ------
+  const funnel = rows.filter(r => r.clicks > r.impressions || r.installs > r.clicks);
+  rows = rows.filter(r => !(r.clicks > r.impressions || r.installs > r.clicks));
+  log(funnel.length ? "error" : "info", "Funnel violations (clicks > impressions or installs > clicks)",
+      funnel.length, funnel.length ? "excluded" : "none found",
+      "Physically impossible funnels indicate tracking corruption; the row cannot be trusted at all.");
+
+  // -- Rule 6: non-USD revenue rows ---------------------------------------
+  const fx = rows.filter(r => r.currency && r.currency !== "USD");
+  rows = rows.filter(r => !r.currency || r.currency === "USD");
+  log(fx.length ? "warn" : "info", "Non-USD revenue rows",
+      fx.length, fx.length ? "excluded (no FX table available in-browser)" : "all rows USD",
+      "Mixing currencies without conversion corrupts ROAS. If this fires next quarter, add an FX column upstream.");
+
+  // -- Rule 7: retention sanity (must be within [0,1], monotone-ish) ------
+  let retClamped = 0;
+  rows.forEach(r => {
+    ["d1","d7","d30"].forEach(k => {
+      if (r[k] != null && (r[k] < 0 || r[k] > 1)) { r[k] = Math.min(1, Math.max(0, r[k])); retClamped++; }
+    });
+  });
+  log(retClamped ? "warn" : "info", "Retention values outside [0, 1]",
+      retClamped, retClamped ? "clamped into range" : "none found",
+      "Retention is a share of the install cohort and must sit between 0 and 1.");
+
+  // -- Rule 7b: retention curve integrity (must be non-increasing) ---------
+  // A retention curve can only decay: D1 ≥ D7 ≥ D30. Any inversion
+  // (D7 > D1, D30 > D7, D30 > D1) is physically impossible and means the
+  // cohort tracking for that row is corrupt. The row's spend/install counts
+  // are kept (the ad platform side is intact), but the row is EXCLUDED from
+  // all retention averages, from the D30/D7 revenue multiplier estimation,
+  // and from projected D30 ROAS.
+  const retCorruptByChannel = {};
+  let retCorruptCount = 0; const retSamples = [];
+  rows.forEach(r => {
+    const bad = (r.d1 != null && r.d7 != null && r.d7 > r.d1) ||
+                (r.d7 != null && r.d30 != null && r.d30 > r.d7) ||
+                (r.d1 != null && r.d30 != null && r.d30 > r.d1);
+    r.retCorrupt = !!bad;
+    if (bad) {
+      retCorruptCount++;
+      retCorruptByChannel[r.channel] = (retCorruptByChannel[r.channel] || 0) + 1;
+      retSamples.length < 4 && retSamples.push(`${r.date} ${r.adset}: D1 ${pct(r.d1,2)} / D7 ${pct(r.d7,2)} / D30 ${pct(r.d30,2)}`);
+    }
+  });
+  log(retCorruptCount ? "warn" : "info", "Impossible retention curves (D7 > D1, or D30 > D7/D1)",
+      retCorruptCount,
+      retCorruptCount ? "rows excluded from retention averages, the D30/D7 revenue multiplier, and projected D30 ROAS (spend/install counts kept)" : "none found",
+      "Retention is a survival curve — it can only decrease over time. Inverted values mean the cohort tracking is corrupt, so nothing cohort-derived from these rows can be trusted." +
+      (retCorruptCount ? ` Affected: ${Object.entries(retCorruptByChannel).map(([ch, n]) => `${ch} (${n} rows)`).join(", ")}.` : ""),
+      retSamples);
+
+  // -- Rule 8: D7 revenue exceeding D30 revenue ----------------------------
+  let revFixed = 0; const revSamples = [];
+  rows.forEach(r => {
+    if (r.rev30 != null && r.rev7 != null && r.rev7 > r.rev30) {
+      revSamples.length < 3 && revSamples.push(`${r.date} ${r.adset}: D7 ${usd(r.rev7,2)} > D30 ${usd(r.rev30,2)}`);
+      r.rev30 = r.rev7; revFixed++; // cumulative revenue can't shrink; floor D30 at D7
+    }
+  });
+  log(revFixed ? "warn" : "info", "Cumulative revenue regression (D7 revenue > D30 revenue)",
+      revFixed, revFixed ? "D30 floored at D7 value" : "none found",
+      "Cumulative cohort revenue cannot decrease. Small regressions are usually refund/restatement noise; we take the conservative floor.", revSamples);
+
+  // -- Rule 9: reported CPI vs recomputed CPI ------------------------------
+  const cpiOff = rows.filter(r => r.installs > 0 && r.cpiReported != null &&
+    Math.abs(r.cpiReported - r.spend / r.installs) / (r.spend / r.installs) > 0.10);
+  log(cpiOff.length ? "warn" : "info", "Pre-computed cpi_usd disagrees with spend/installs by >10%",
+      cpiOff.length, "cpi_usd column ignored; all rate metrics recomputed from raw counts",
+      "Derived columns in exports drift (rounding, partial-day refreshes). This dashboard never trusts them — CPI/CTR/CVR/ROAS are always recomputed.");
+
+  // -- Rule 10: cohort maturity classification -----------------------------
+  const maxDate = rows.reduce((m, r) => r.date > m ? r.date : m, "0000-00-00");
+  const minDate = rows.reduce((m, r) => r.date < m ? r.date : m, "9999-99-99");
+  let immature = 0, missingMature = 0;
+  rows.forEach(r => {
+    r.isMature = daysBetween(r.date, maxDate) >= CONFIG.MATURITY_DAYS;
+    if (r.rev30 == null) {
+      if (!r.isMature) { immature++; }               // expected — will be projected
+      else { r.rev30 = 0; missingMature++; }         // genuinely missing on an old cohort
+    }
+  });
+  log("info", `Immature cohorts (installed < ${CONFIG.MATURITY_DAYS} days before ${maxDate})`,
+      immature, "D30 revenue projected from D7 × matured-cohort multiplier",
+      "These rows are too recent to have observed 30-day revenue. Dropping them would erase the newest month; instead their D30 is projected and labeled as such everywhere it is used.");
+  log(missingMature ? "warn" : "info", "Matured cohorts still missing D30 revenue",
+      missingMature, missingMature ? "treated as $0 (conservative)" : "none found",
+      "Old cohorts with no D30 number get zero credit rather than a flattering guess.");
+
+  const months = [...new Set(rows.map(r => r.date.slice(0, 7)))].sort();
+  const windows = {};
+  rows.forEach(r => { windows[r.channel] = r.attribution_window; });
+
+  return {
+    rows, audit,
+    meta: { minDate, maxDate, months, monthCount: Math.max(1, months.length),
+            refundTotal: Math.abs(refundTotal), refundCount: refunds.length,
+            outageSpend, outageCount: outage.length,
+            attributionWindows: windows, rawCount: rawRows.length, cleanCount: rows.length },
+  };
+}
+
+/* ================================================================
+   SECTION 3 — D30 PROJECTION MULTIPLIER
+   From matured cohorts only: multiplier = Σ rev30 / Σ rev7.
+   Campaigns with enough matured D7 revenue get their own multiplier;
+   thin ones inherit the portfolio's.
+   ================================================================ */
+function computeMultipliers(rows) {
+  // Corrupt-retention rows are excluded: if the cohort tracking inverted the
+  // retention curve, its D7/D30 revenue split is equally untrustworthy.
+  const mature = rows.filter(r => r.isMature && r.rev30 != null && r.rev7 != null && !r.retCorrupt);
+  const pf7 = mature.reduce((a, r) => a + r.rev7, 0);
+  const pf30 = mature.reduce((a, r) => a + r.rev30, 0);
+  const portfolio = pf7 > 0 ? pf30 / pf7 : 1;
+
+  const perCampaign = {};
+  const groups = {};
+  mature.forEach(r => { (groups[r.campaign] = groups[r.campaign] || []).push(r); });
+  Object.entries(groups).forEach(([c, rs]) => {
+    const s7 = rs.reduce((a, r) => a + r.rev7, 0);
+    const s30 = rs.reduce((a, r) => a + r.rev30, 0);
+    perCampaign[c] = s7 >= CONFIG.MIN_MATURE_REV7_FOR_CAMPAIGN_MULT ? s30 / s7 : portfolio;
+  });
+  return { portfolio, perCampaign };
+}
+
+/* ================================================================
+   SECTION 4 — AGGREGATION
+   One function, three grains (channel / campaign / adset).
+   Also computes confidence tier = the "trustworthy signal" rule.
+   ================================================================ */
+function confidenceTier(spend, installs) {
+  const moe = installs > 0 ? 1.96 / Math.sqrt(installs) : Infinity;
+  if (spend >= CONFIG.TRUST.HIGH.minSpend && moe <= CONFIG.TRUST.HIGH.maxMoe) return { tier: "HIGH", moe };
+  if (spend >= CONFIG.TRUST.MEDIUM.minSpend && moe <= CONFIG.TRUST.MEDIUM.maxMoe) return { tier: "MEDIUM", moe };
+  return { tier: "LOW", moe };
+}
+
+function aggregateBy(rows, keyFn, mult, monthCount) {
+  const groups = {};
+  rows.forEach(r => {
+    const k = keyFn(r);
+    (groups[k] = groups[k] || []).push(r);
+  });
+  return Object.entries(groups).map(([key, rs]) => {
+    const sum = f => rs.reduce((a, r) => a + (f(r) || 0), 0);
+    const spend = sum(r => r.spend), installs = sum(r => r.installs);
+    const clicks = sum(r => r.clicks), imps = sum(r => r.impressions);
+    const rev7 = sum(r => r.rev7);
+    // Rows with corrupt retention curves keep their spend/install counts
+    // (ad-platform side intact) but are excluded from everything
+    // cohort-derived: retention averages and projected D30 ROAS.
+    const projRs = rs.filter(r => !r.retCorrupt);
+    const projSpend = projRs.reduce((a, r) => a + r.spend, 0);
+    const projInstalls = projRs.reduce((a, r) => a + r.installs, 0);
+    const matureRs = projRs.filter(r => r.isMature);
+    const matureSpend = matureRs.reduce((a, r) => a + r.spend, 0);
+    const matureRev30 = matureRs.reduce((a, r) => a + (r.rev30 || 0), 0);
+    // projected D30 = observed matured D30 + (immature D7 rev × multiplier)
+    const m = mult.perCampaign[rs[0].campaign] || mult.portfolio;
+    const immatureRev7 = projRs.filter(r => !r.isMature).reduce((a, r) => a + (r.rev7 || 0), 0);
+    const projRev30 = matureRev30 + immatureRev7 * m;
+    const conf = confidenceTier(spend, installs);
+    return {
+      key, channel: rs[0].channel, campaign: rs[0].campaign,
+      attribution_window: rs[0].attribution_window,
+      rowCount: rs.length, spend, installs, clicks, impressions: imps,
+      monthlySpend: spend / monthCount,
+      cpi: safeDiv(spend, installs), ctr: safeDiv(clicks, imps), cvr: safeDiv(installs, clicks),
+      roas7: safeDiv(rev7, spend),
+      roas30Mature: matureSpend >= 100 ? safeDiv(matureRev30, matureSpend) : null,
+      projRoas30: safeDiv(projRev30, projSpend),
+      projRev30, projSpend, rev7, matureSpend,
+      d1: safeDiv(projRs.reduce((a, r) => a + (r.d1 || 0) * r.installs, 0), projInstalls),
+      d7ret: safeDiv(projRs.reduce((a, r) => a + (r.d7 || 0) * r.installs, 0), projInstalls),
+      confidence: conf.tier, moe: conf.moe,
+      multiplierUsed: m,
+    };
+  }).sort((a, b) => b.spend - a.spend);
+}
+
+/* ================================================================
+   SECTION 5 — INSIGHT ENGINE
+   Each detector is a pure function over the aggregates; it returns
+   insight objects only when its statistical trigger fires, always
+   citing the exact numbers that fired it. No canned advice.
+   ================================================================ */
+const median = arr => {
+  const v = arr.filter(x => x != null).sort((a, b) => a - b);
+  return v.length ? v[Math.floor(v.length / 2)] : null;
+};
+
+function generateInsights({ campaigns, channels, adsets, rows, meta, mult }) {
+  const insights = [];
+  const trusted = campaigns.filter(c => c.confidence !== "LOW");
+  const pfRoas = safeDiv(campaigns.reduce((a, c) => a + c.projRev30, 0),
+                         campaigns.reduce((a, c) => a + c.projSpend, 0));
+  const medCpi = median(trusted.map(c => c.cpi));
+  const medRet = median(trusted.map(c => c.d7ret));
+
+  // --- 1. Vanity-CPI trap: cheap installs, terrible economics ----------
+  trusted.forEach(c => {
+    if (c.cpi != null && medCpi != null && c.cpi <= medCpi * 0.5 &&
+        c.projRoas30 != null && c.projRoas30 < pfRoas * 0.5) {
+      insights.push({
+        severity: "critical", tag: "Vanity-CPI trap",
+        title: `${c.key} (${c.channel}): do NOT scale on its ${usd(c.cpi,2)} CPI`,
+        body: `Its CPI is ${(c.cpi/medCpi*100).toFixed(0)}% of the portfolio median (${usd(medCpi,2)}), which looks like a bargain — but D7 retention is ${pct(c.d7ret)} vs a ${pct(medRet)} portfolio median, and projected D30 ROAS is only ${pct(c.projRoas30)} against a ${pct(pfRoas)} portfolio average. Cheap installs that don't retain are low-intent traffic, not efficiency. Every extra dollar here buys volume, not payback.`,
+        evidence: [`CPI ${usd(c.cpi,2)} (median ${usd(medCpi,2)})`, `D7 retention ${pct(c.d7ret)}`, `proj. D30 ROAS ${pct(c.projRoas30)}`, `${num(c.installs)} installs — ${c.confidence} confidence (±${pct(c.moe)})`],
+      });
+    }
+  });
+
+  // --- 2. Hidden gems: high ROAS, small spend share ----------------------
+  const totalSpend = campaigns.reduce((a, c) => a + c.spend, 0);
+  trusted.forEach(c => {
+    if (c.projRoas30 != null && pfRoas != null && c.projRoas30 >= pfRoas * 1.5 && c.spend / totalSpend < 0.10) {
+      const isDC = CONFIG.DEMAND_CAPTURE_REGEX.test(c.key);
+      insights.push({
+        severity: "opportunity", tag: isDC ? "Efficient demand capture" : "Under-funded winner",
+        title: `${c.key} (${c.channel}): ${pct(c.projRoas30)} projected D30 ROAS on only ${pct(c.spend/totalSpend)} of spend`,
+        body: `It converts at ${usd(c.cpi,2)} CPI with ${pct(c.d7ret)} D7 retention and returns ${pct(c.projRoas30)} of spend by D30 — ${(c.projRoas30/pfRoas).toFixed(1)}× the portfolio average.` +
+          (isDC ? ` However, this is a demand-capture campaign: it harvests demand created by prospecting and organic (brand searches, the retargeting pool), so its ROAS is partly attribution, not fully incremental, and its inventory is bounded. The budget plan funds it to full historical coverage but does NOT scale it — the way to grow this campaign is to grow the demand pool that feeds it.` : ` It received just ${usd(c.spend)} this quarter — increase budget in controlled steps and watch marginal CPI.`),
+        evidence: [`proj. D30 ROAS ${pct(c.projRoas30)} vs portfolio ${pct(pfRoas)}`, `spend share ${pct(c.spend/totalSpend)}`, `${c.confidence} confidence (±${pct(c.moe)})`],
+      });
+    }
+  });
+
+  // --- 3. Momentum: first-30d vs last-30d ROAS-D7 per channel ------------
+  channels.forEach(ch => {
+    const chRows = rows.filter(r => r.channel === ch.key);
+    const cutEarly = new Date(new Date(meta.minDate).getTime() + 30 * 86400000).toISOString().slice(0, 10);
+    const cutLate = new Date(new Date(meta.maxDate).getTime() - 30 * 86400000).toISOString().slice(0, 10);
+    const agg = rs => { const s = rs.reduce((a, r) => a + r.spend, 0); return safeDiv(rs.reduce((a, r) => a + (r.rev7 || 0), 0), s); };
+    const early = agg(chRows.filter(r => r.date < cutEarly));
+    const late = agg(chRows.filter(r => r.date >= cutLate));
+    if (early != null && late != null && early > 0 && Math.abs(late / early - 1) >= 0.15) {
+      const dir = late > early ? "improved" : "deteriorated";
+      insights.push({
+        severity: late > early ? "opportunity" : "warning", tag: "Momentum shift",
+        title: `${ch.key}: D7 ROAS ${dir} ${pct(Math.abs(late/early-1),0)} within the quarter`,
+        body: `First 30 days ran ${pct(early)} D7 ROAS; the final 30 days ran ${pct(late)}. ${late > early ? "The budget plan already rewards this, but validate the trend holds before extra scaling." : "Bake this decay into expectations — quarter-average metrics flatter this channel."}`,
+        evidence: [`first 30d ${pct(early)}`, `last 30d ${pct(late)}`],
+      });
+    }
+  });
+
+  // --- 4. Retention cliff: users vanish between D1 and D7 ----------------
+  trusted.forEach(c => {
+    if (c.d1 > 0 && c.d7ret != null && c.d7ret / c.d1 < 0.30 && c.d7ret < medRet * 0.5) {
+      insights.push({
+        severity: "warning", tag: "Retention cliff",
+        title: `${c.key} (${c.channel}): ${pct(1 - c.d7ret/c.d1,0)} of D1 users are gone by D7`,
+        body: `D1 retention ${pct(c.d1)} collapses to ${pct(c.d7ret)} by D7 (portfolio median ${pct(medRet)}). This pattern — a decent first open, then abandonment — usually means the creative/placement attracts curiosity clicks, not users with real intent. Fix targeting or creative before spending more; more budget only rents more tourists.`,
+        evidence: [`D1 ${pct(c.d1)} → D7 ${pct(c.d7ret)}`, `portfolio median D7 ${pct(medRet)}`],
+      });
+    }
+  });
+
+  // --- 5. Adset dispersion: prune the losers inside good campaigns -------
+  campaigns.forEach(c => {
+    const kids = adsets.filter(a => a.campaign === c.key && a.confidence !== "LOW" && a.roas7 != null);
+    if (kids.length >= 3) {
+      const sorted = [...kids].sort((a, b) => b.roas7 - a.roas7);
+      const best = sorted[0], worst = sorted[sorted.length - 1];
+      if (worst.roas7 > 0 && best.roas7 / worst.roas7 >= 3 && worst.spend >= 1000) {
+        insights.push({
+          severity: "action", tag: "Adset pruning",
+          title: `${c.key}: ${best.roas7 / worst.roas7 >= 5 ? "extreme" : "wide"} internal spread — shift budget from ${worst.key} to ${best.key}`,
+          body: `Within the same campaign, ${best.key} runs ${pct(best.roas7)} D7 ROAS while ${worst.key} runs ${pct(worst.roas7)} on ${usd(worst.spend)} of spend — a ${(best.roas7/worst.roas7).toFixed(1)}× gap on comparable traffic. Reallocating the weakest adset's budget to the strongest is the cheapest efficiency win available: no new creative, no new channel risk.`,
+          evidence: [`${best.key}: ${pct(best.roas7)} D7 ROAS`, `${worst.key}: ${pct(worst.roas7)} on ${usd(worst.spend)}`],
+        });
+      }
+    }
+  });
+
+  // --- 6. Attribution comparability caveat -------------------------------
+  const winSet = [...new Set(Object.values(meta.attributionWindows))];
+  if (winSet.length > 1) {
+    insights.push({
+      severity: "info", tag: "Measurement",
+      title: `Channels report on ${winSet.length} different attribution windows — cross-channel ROAS is not apples-to-apples`,
+      body: `Detected: ${Object.entries(meta.attributionWindows).map(([ch, w]) => `${ch} = ${w}`).join(", ")}. A 30d-click window credits far more conversions than a 1d-tap window, so channels on long windows look structurally better. Rankings within a channel are safe; when comparing across channels, treat gaps under ~20% as measurement noise, not performance.`,
+      evidence: Object.entries(meta.attributionWindows).map(([ch, w]) => `${ch}: ${w}`),
+    });
+  }
+
+  // --- 7. Concentration risk ----------------------------------------------
+  channels.forEach(ch => {
+    if (ch.spend / totalSpend > 0.45) {
+      insights.push({
+        severity: "info", tag: "Portfolio risk",
+        title: `${ch.key} carries ${pct(ch.spend/totalSpend,0)} of total spend`,
+        body: `A single channel above ~45% of budget exposes the plan to one platform's policy, auction, or attribution changes. The recommended allocation keeps diversification in mind but efficiency still dominates — accept the concentration knowingly.`,
+        evidence: [`${ch.key} spend ${usd(ch.spend)} of ${usd(totalSpend)}`],
+      });
+    }
+  });
+
+  // --- 8. Projection reliability note --------------------------------------
+  insights.push({
+    severity: "info", tag: "Methodology",
+    title: `D30 revenue for the newest cohorts is projected at ${mult.portfolio.toFixed(2)}× their D7 revenue`,
+    body: `Cohorts younger than ${CONFIG.MATURITY_DAYS} days can't have observed D30 revenue yet. On fully-matured cohorts this portfolio's D30 revenue lands at ${mult.portfolio.toFixed(2)}× D7 revenue (per-campaign multipliers used where matured D7 revenue ≥ ${usd(CONFIG.MIN_MATURE_REV7_FOR_CAMPAIGN_MULT)}). All "projected D30 ROAS" figures use this. The 60-day checkpoint validates the projection against reality.`,
+    evidence: [`portfolio multiplier ${mult.portfolio.toFixed(2)}×`],
+  });
+
+  const order = { critical: 0, action: 1, warning: 2, opportunity: 3, info: 4 };
+  return insights.sort((a, b) => order[a.severity] - order[b.severity]);
+}
+
+/* ================================================================
+   SECTION 6 — BUDGET RECOMMENDATION ENGINE ($50K/month)
+   1. Classify each campaign as DEMAND CAPTURE (brand/retargeting —
+      harvests bounded, externally-created demand) or PROSPECTING
+      (creates new top-of-funnel demand).
+   2. Verdict each by projected D30 ROAS + confidence.
+   3. Allocate in two stages:
+        Stage 1 — fund demand capture FIRST, hard-capped at its
+                  historical monthly volume (its ceiling is organic
+                  brand-query volume / retargeting-pool size, so its
+                  ROAS does not survive scaling);
+        Stage 2 — ALL remaining budget water-fills prospecting
+                  campaigns proportional to projected D30 ROAS,
+                  within per-verdict caps.
+   4. Kill sub-viable allocations (< $2k/mo) and redistribute.
+   Every verdict carries the metrics that produced it.
+   ================================================================ */
+function buildBudgetPlan(campaigns, meta) {
+  const B = CONFIG.MONTHLY_BUDGET;
+
+  // -- Step 1+2: type classification and verdicts ---------------------------
+  const items = campaigns.map(c => {
+    const isDC = CONFIG.DEMAND_CAPTURE_REGEX.test(c.key);
+    const type = isDC ? "DEMAND CAPTURE" : "PROSPECTING";
+    const r = c.projRoas30;
+    let verdict, why;
+    if (c.confidence === "LOW") {
+      verdict = "CUT";
+      why = `Signal too weak to justify budget: only ${usd(c.spend)} spend / ${num(c.installs)} installs this quarter (±${pct(c.moe)} margin of error). Unproven ≠ bad, but with a constrained budget, unproven loses to proven.`;
+    } else if (r >= CONFIG.ROAS30.scale) {
+      if (isDC) {
+        verdict = "MAINTAIN";
+        why = `Projected D30 ROAS ${pct(r)} — ${(r).toFixed(1)}× breakeven — would justify aggressive scaling on efficiency alone. But this is a demand-capture campaign: it harvests demand created elsewhere (organic brand searches, the retargeting pool built by prospecting), and that inventory is finite. Pushing past historical volume buys broader query matches and stale pool segments at sharply worse incremental ROAS. Funded first, hard-capped at its historical ${usd(c.monthlySpend,0)}/mo — full coverage, zero forced expansion.`;
+      } else {
+        verdict = "SCALE";
+        why = `Projected D30 ROAS ${pct(r)} — ${(r).toFixed(1)}× breakeven — with CPI ${usd(c.cpi,2)} and D7 retention ${pct(c.d7ret)} on ${c.confidence} confidence (${num(c.installs)} installs). Pays back inside 30 days, and as prospecting it creates new demand rather than harvesting a bounded pool. Growth still capped at ${CONFIG.SCALE_CAP_X}× its historical ${usd(c.monthlySpend,0)}/mo to avoid the marginal-efficiency cliff.`;
+      }
+    } else if (r >= CONFIG.ROAS30.maintain) {
+      verdict = "MAINTAIN";
+      why = `Projected D30 ROAS ${pct(r)} — below breakeven at D30 but with the observed ${c.multiplierUsed.toFixed(2)}× D7→D30 revenue curve still compounding, plausibly profitable on a 90–180 day horizon. CPI ${usd(c.cpi,2)}, D7 retention ${pct(c.d7ret)}.` +
+        (isDC ? ` As demand capture it is funded first but capped at its historical ${usd(c.monthlySpend,0)}/mo ceiling.` : ` As prospecting it competes for the post-demand-capture budget on ROAS; held at or below current level until cohorts improve.`);
+    } else if (r >= CONFIG.ROAS30.reduce) {
+      verdict = "REDUCE";
+      why = `Projected D30 ROAS ${pct(r)} needs >${(1/r).toFixed(1)}× post-D30 revenue growth to ever pay back — beyond the observed curve. Cut to ≤${CONFIG.REDUCE_CAP_X}× current spend, keep only the best adsets, re-evaluate in 30 days.`;
+    } else {
+      verdict = "CUT";
+      why = `Projected D30 ROAS ${pct(r)} with D7 retention ${pct(c.d7ret)}: recovers ${pct(r,0)} of spend by D30 with no realistic curve to breakeven. This is where the budget cut comes from — killing it funds the rest of the plan.`;
+    }
+    let capX = { SCALE: CONFIG.SCALE_CAP_X, MAINTAIN: CONFIG.MAINTAIN_CAP_X, REDUCE: CONFIG.REDUCE_CAP_X, CUT: 0 }[verdict];
+    if (isDC) capX = Math.min(capX, CONFIG.DEMAND_CAPTURE_CAP_X); // hard ceiling, regardless of ROAS
+    return { ...c, type, isDC, verdict, why, cap: c.monthlySpend * capX, alloc: 0,
+             weight: Math.max(0.01, r || 0) };
+  });
+
+  // Water-fill: distribute a budget across a list proportional to ROAS
+  // weight, clipping at each campaign's cap and redistributing overflow.
+  const waterFill = (list, budget) => {
+    list.forEach(i => i.alloc = 0);
+    let remaining = budget;
+    let active = list.filter(i => i.cap > 0);
+    for (let iter = 0; iter < 50 && remaining > 1 && active.length; iter++) {
+      const wSum = active.reduce((a, i) => a + i.weight, 0);
+      let spent = 0;
+      active.forEach(i => {
+        const give = Math.min(remaining * i.weight / wSum, i.cap - i.alloc);
+        i.alloc += give; spent += give;
+      });
+      remaining -= spent;
+      active = active.filter(i => i.cap - i.alloc > 1);
+      if (spent < 1) break;
+    }
+    return remaining;
+  };
+
+  // -- Step 3: two-stage allocation ------------------------------------------
+  const allocateAll = () => {
+    const dc = items.filter(i => i.isDC);
+    const pros = items.filter(i => !i.isDC);
+    // Stage 1: demand capture funded first, at (bounded) full caps
+    waterFill(dc, Math.min(B, dc.reduce((a, i) => a + i.cap, 0)));
+    const dcTotal = dc.reduce((a, i) => a + i.alloc, 0);
+    // Stage 2: every remaining dollar flows to prospecting by ROAS
+    return waterFill(pros, B - dcTotal);
+  };
+  let leftover = allocateAll();
+
+  // -- Step 4: kill sub-viable slivers, redistribute ------------------------
+  let pruned = true;
+  while (pruned) {
+    pruned = false;
+    const sliver = items.filter(i => i.alloc > 0 && i.alloc < CONFIG.MIN_VIABLE_MONTHLY)
+                        .sort((a, b) => a.alloc - b.alloc)[0];
+    if (sliver) {
+      sliver.verdict = "CUT";
+      sliver.why += ` (Final allocation landed below the ${usd(CONFIG.MIN_VIABLE_MONTHLY)}/mo minimum viable test budget — a sliver that can't produce statistically usable signal, so it is consolidated into stronger campaigns.)`;
+      sliver.cap = 0;
+      leftover = allocateAll();
+      pruned = true;
+    }
+  }
+
+  const allocated = items.reduce((a, i) => a + i.alloc, 0);
+
+  // -- Projected plan outcome (for guardrails) ------------------------------
+  const projRev = items.reduce((a, i) => a + i.alloc * (i.projRoas30 || 0), 0);
+  const planRoas = safeDiv(projRev, allocated);
+  const blendedRoas7 = safeDiv(items.reduce((a, i) => a + i.alloc * (i.roas7 || 0), 0), allocated);
+
+  // -- 30/60/90-day revisit thresholds, computed from actual metrics --------
+  const survivors = items.filter(i => i.alloc > 0).sort((a, b) => b.alloc - a.alloc);
+  const checkpoints = {
+    d30: {
+      title: "Day 30 — efficiency guardrails at new spend levels",
+      rules: survivors.map(i => ({
+        campaign: `${i.key} (${i.type.toLowerCase()})`,
+        rule: `Revisit if CPI exceeds ${usd((i.cpi||0)*CONFIG.GUARD.cpiDriftX,2)} (current ${usd(i.cpi,2)} × ${CONFIG.GUARD.cpiDriftX}) or D7 ROAS falls below ${pct((i.roas7||0)*CONFIG.GUARD.roasFloorX)} (current ${pct(i.roas7)} × ${CONFIG.GUARD.roasFloorX}), measured on ≥ ${usd(i.alloc*0.5,0)} of month-1 spend. ${i.isDC ? "For demand capture, a rising CPI at flat budget means the pool is saturating (brand-query volume or retargeting audience shrinking) — trim budget to match the pool, don't chase it." : i.verdict === "SCALE" ? "Scaled campaigns get zero grace — auction efficiency decays first at higher budgets." : "If breached, step down one tier."}`,
+      })).concat([{ campaign: "Plan-level", rule: `Blended D7 ROAS across the plan should run ≥ ${pct((blendedRoas7||0)*CONFIG.GUARD.roasFloorX)} (expected ${pct(blendedRoas7)}). Below that, re-run this dashboard on month-1 data and rebalance immediately rather than waiting for the quarter. Also verify no repeat of tracking outages: any day with spend but zero recorded installs is a postback failure to escalate with the MMP within 48h, not a performance signal.` }]),
+    },
+    d60: {
+      title: "Day 60 — validate the D30 projection against reality",
+      rules: [
+        { campaign: "All campaigns", rule: `Month-1 cohorts are now D30-mature. Compare their actual D30/D7 revenue multiplier to the ${ (campaigns[0]?.multiplierUsed || 0).toFixed(2) }× used for projections. If reality lands outside ±${pct(CONFIG.GUARD.multiplierTolerance,0)}, every projected-ROAS verdict in this plan inherits that error — re-run the classification with the corrected multiplier.` },
+        ...survivors.filter(i => i.alloc > i.monthlySpend * 1.05).map(i => ({
+          campaign: i.key,
+          rule: `Confirm matured D30 ROAS stays ≥ ${pct(CONFIG.ROAS30.scale)} at the new ${usd(i.alloc,0)}/mo level (it earned scaling at ${pct(i.projRoas30)} on ${usd(i.monthlySpend,0)}/mo). If it slipped below breakeven, the extra spend bought worse auctions — revert to ${usd(i.monthlySpend,0)}/mo.`,
+        })),
+        ...survivors.filter(i => i.isDC).slice(0, 1).map(() => ({
+          campaign: "Demand capture tier",
+          rule: `These campaigns are held at historical volume by design. If any consistently exhausts its budget early in the day (impression share lost to budget), that is evidence the underlying pool GREW — prospecting is working. Only then raise its cap, in ≤15% steps, and never above what the pool supports at stable CPI.`,
+        })),
+      ],
+    },
+    d90: {
+      title: "Day 90 — full replan",
+      rules: [
+        { campaign: "Portfolio", rule: `Export the quarter's CSV and drop it into this dashboard — every verdict re-derives automatically. Target: blended projected D30 ROAS ≥ ${pct(planRoas)} (this plan's expectation). Campaigns CUT this quarter may re-enter only via a ${usd(CONFIG.MIN_VIABLE_MONTHLY)}–${usd(CONFIG.MIN_VIABLE_MONTHLY*2.5,0)}/mo test cell with fixed creative hypotheses — never at previous full budgets.` },
+      ],
+    },
+  };
+
+  return { items: items.sort((a, b) => b.alloc - a.alloc), allocated, leftover, planRoas, blendedRoas7, checkpoints };
+}
+
+/* ================================================================
+   SECTION 7 — DAILY SERIES (for trend chart, 7-day trailing ROAS)
+   ================================================================ */
+function dailyRoasSeries(rows) {
+  const byDate = {};
+  rows.forEach(r => {
+    const d = (byDate[r.date] = byDate[r.date] || {});
+    const c = (d[r.channel] = d[r.channel] || { spend: 0, rev7: 0 });
+    c.spend += r.spend; c.rev7 += r.rev7 || 0;
+  });
+  const dates = Object.keys(byDate).sort();
+  const channels = [...new Set(rows.map(r => r.channel))];
+  // 7-day trailing window smooths daily attribution noise
+  return dates.map((date, i) => {
+    const win = dates.slice(Math.max(0, i - 6), i + 1);
+    const pt = { date };
+    channels.forEach(ch => {
+      let s = 0, rv = 0;
+      win.forEach(d => { const c = byDate[d][ch]; if (c) { s += c.spend; rv += c.rev7; } });
+      pt[ch] = s > 0 ? +(rv / s * 100).toFixed(1) : null;
+    });
+    return pt;
+  });
+}
+
+/* ================================================================
+   SECTION 7B — CREATIVE LIBRARY PIPELINE (Part 2, Task 1.1)
+   Inner-joins an uploaded creative-performance CSV against
+   creativeTagsDB on creative_id, aggregates per creative and per
+   taxonomy dimension, and generates tag-level insights.
+   Pure ES6 (Map/reduce/filter) — no external join helpers.
+   ================================================================ */
+
+// Taxonomy dimensions analysed for tag-level insights
+const CREATIVE_DIMENSIONS = [
+  "visual_format", "hook_type", "core_tone", "cta_type",
+  "pacing", "native_feel_score", "language", "promoted_product",
+];
+
+function buildCreativeModel(rawRows) {
+  const tagIndex = new Map(creativeTagsDB.map(t => [t.creative_id, t]));
+
+  // -- Column resolution: tolerate common export variants ----------------
+  const cols = Object.keys(rawRows[0] || {});
+  const pick = (...cands) => cands.find(c => cols.includes(c)) || null;
+  const C = {
+    id: pick("creative_id"),
+    spend: pick("spend_usd", "spend"),
+    imps: pick("impressions"),
+    installs: pick("installs"),
+    rev7: pick("revenue_d7_usd", "revenue_d7", "rev_d7_usd"),
+    thumb: cols.find(c => /thumbstop/i.test(c)) || null,
+    hold: cols.find(c => /hold/i.test(c)) || null,
+  };
+  if (!C.id || !C.spend) return { fatal: "Creative CSV needs at least creative_id and spend_usd columns." };
+
+  // -- Typed rows; structurally invalid rows dropped (and counted) --------
+  let dropped = 0;
+  const rows = rawRows
+    .map(r => ({
+      id: (r[C.id] || "").trim(),
+      spend: parseNum(r[C.spend]),
+      imps: parseNum(r[C.imps]) || 0,
+      installs: parseNum(r[C.installs]) || 0,
+      rev7: parseNum(r[C.rev7]) || 0,
+      thumb: C.thumb ? parseNum(r[C.thumb]) : null,
+      hold: C.hold ? parseNum(r[C.hold]) : null,
+    }))
+    .filter(r => { const ok = r.id && r.spend != null && r.spend >= 0; if (!ok) dropped++; return ok; });
+  if (!rows.length) return { fatal: "No valid creative rows after cleaning." };
+
+  // -- Rate normalisation: accept 0–1 fractions or 0–100 percentages ------
+  const maxRate = rows.reduce((m, r) => Math.max(m, r.thumb || 0, r.hold || 0), 0);
+  if (maxRate > 1.5) rows.forEach(r => {
+    if (r.thumb != null) r.thumb /= 100;
+    if (r.hold != null) r.hold /= 100;
+  });
+
+  // -- INNER JOIN on creative_id + per-creative aggregation ---------------
+  // Rates (thumbstop/hold) are impression-weighted; money metrics are sums.
+  const untagged = new Set();
+  const byId = rows.reduce((map, r) => {
+    if (!tagIndex.has(r.id)) { untagged.add(r.id); return map; } // inner join: no tag → excluded
+    const g = map.get(r.id) || { id: r.id, spend: 0, imps: 0, installs: 0, rev7: 0, tw: 0, hw: 0, wSum: 0, rowCount: 0 };
+    g.spend += r.spend; g.imps += r.imps; g.installs += r.installs; g.rev7 += r.rev7;
+    const w = r.imps || r.spend || 1;                 // weight rates by impressions (fallback: spend)
+    if (r.thumb != null) { g.tw += r.thumb * w; g.wSum += w; }
+    if (r.hold != null) g.hw += r.hold * w;
+    g.rowCount++;
+    return map.set(r.id, g);
+  }, new Map());
+
+  const joined = [...byId.values()].map(g => {
+    const thumbstop = safeDiv(g.tw, g.wSum), hold15 = safeDiv(g.hw, g.wSum);
+    return {
+      ...tagIndex.get(g.id), key: g.id,
+      spend: g.spend, impressions: g.imps, installs: g.installs, rev7: g.rev7,
+      cpi: safeDiv(g.spend, g.installs), roas7: safeDiv(g.rev7, g.spend),
+      thumbstop, hold15,
+      holdRatio: safeDiv(hold15, thumbstop),          // share of stopped thumbs still there at 15s
+      rowCount: g.rowCount,
+    };
+  }).sort((a, b) => b.spend - a.spend);
+
+  // -- Join report (both directions of the mismatch) -----------------------
+  const noPerf = creativeTagsDB.filter(t => !byId.has(t.creative_id)).map(t => t.creative_id);
+  const report = {
+    totalRows: rawRows.length, keptRows: rows.length - [...untagged].reduce((a, id) => a + rows.filter(r => r.id === id).length, 0),
+    droppedInvalid: dropped, untagged: [...untagged].sort(), noPerf,
+  };
+
+  // -- Per-dimension aggregates --------------------------------------------
+  const dims = CREATIVE_DIMENSIONS.reduce((acc, dim) => {
+    const groups = joined.reduce((m, c) => {
+      const k = c[dim] || "Unknown";
+      return m.set(k, [...(m.get(k) || []), c]);
+    }, new Map());
+    acc[dim] = [...groups.entries()].map(([tag, cs]) => {
+      const spend = cs.reduce((a, c) => a + c.spend, 0);
+      const imps = cs.reduce((a, c) => a + c.impressions, 0);
+      return {
+        tag, nCreatives: cs.length, spend,
+        installs: cs.reduce((a, c) => a + c.installs, 0),
+        rev7: cs.reduce((a, c) => a + c.rev7, 0),
+        roas7: safeDiv(cs.reduce((a, c) => a + c.rev7, 0), spend),
+        cpi: safeDiv(spend, cs.reduce((a, c) => a + c.installs, 0)),
+        thumbstop: safeDiv(cs.reduce((a, c) => a + (c.thumbstop || 0) * c.impressions, 0), imps),
+        hold15: safeDiv(cs.reduce((a, c) => a + (c.hold15 || 0) * c.impressions, 0), imps),
+        creatives: cs.map(c => c.key).join(", "),
+      };
+    }).sort((a, b) => b.spend - a.spend);
+    return acc;
+  }, {});
+
+  const insights = generateCreativeInsights(joined, dims);
+  return { joined, dims, insights, report };
+}
+
+/* Tag-level insight engine: every detector compares real weighted
+   aggregates and only fires past CONFIG.CREATIVE.MIN_REL_GAP, quoting
+   the numbers (and sample sizes) that triggered it. */
+function generateCreativeInsights(joined, dims) {
+  const insights = [];
+  const G = CONFIG.CREATIVE.MIN_REL_GAP;
+  const qualified = dim => dims[dim].filter(g => g.spend >= CONFIG.CREATIVE.MIN_TAG_SPEND);
+  const blendedRoas = safeDiv(joined.reduce((a, c) => a + c.rev7, 0), joined.reduce((a, c) => a + c.spend, 0));
+
+  // --- 1. Hook × thumbstop: the strongest top-of-funnel mechanism --------
+  const hooks = qualified("hook_type").filter(g => g.thumbstop != null);
+  if (hooks.length >= 2) {
+    const byThumb = [...hooks].sort((a, b) => b.thumbstop - a.thumbstop);
+    const top = byThumb[0], med = median(hooks.map(g => g.thumbstop));
+    if (top.thumbstop >= med * (1 + G)) {
+      insights.push({
+        severity: "opportunity", tag: "Hook insight",
+        title: `'${top.hook_type || top.tag}' is the strongest scroll-stopper: ${pct(top.thumbstop)} 3s thumbstop`,
+        body: `Across ${top.nCreatives} creative${top.nCreatives > 1 ? "s" : ""} (${top.creatives}) and ${usd(top.spend)} of spend, the '${top.tag}' hook stops ${pct(top.thumbstop)} of impressions at 3 seconds — ${pct(top.thumbstop / med - 1, 0)} above the ${pct(med)} median across hook types. It is the portfolio's best top-of-funnel mechanism: brief new concepts with this hook first, and test transplanting it onto mid-funnel formats that currently open weakly.`,
+        evidence: byThumb.slice(0, 4).map(g => `${g.tag}: ${pct(g.thumbstop)} (n=${g.nCreatives}, ${usd(g.spend)})`),
+      });
+    }
+  }
+
+  // --- 2. Visual format × ROAS: what actually converts --------------------
+  const formats = qualified("visual_format").filter(g => g.roas7 != null);
+  if (formats.length >= 2) {
+    const byRoas = [...formats].sort((a, b) => b.roas7 - a.roas7);
+    const top = byRoas[0], med = median(formats.map(g => g.roas7));
+    if (top.roas7 >= med * (1 + G)) {
+      insights.push({
+        severity: "opportunity", tag: "Format insight",
+        title: `'${top.tag}' is the highest-yield format: ${pct(top.roas7)} D7 ROAS, ${pct(top.roas7 / med - 1, 0)} above the format median`,
+        body: `'${top.tag}' (${top.creatives}) returns ${pct(top.roas7)} of spend within 7 days vs a ${pct(med)} median across formats and ${pct(blendedRoas)} blended for the whole library, at ${usd(top.cpi, 2)} CPI. Production budget should follow: commission the next batch in this format${top.nCreatives < 2 ? " — but note this reading rests on a single creative, so validate with one more before committing the full pipeline" : ""}.`,
+        evidence: byRoas.slice(0, 4).map(g => `${g.tag}: ${pct(g.roas7)} ROAS D7 (n=${g.nCreatives}, ${usd(g.spend)})`),
+      });
+    }
+  }
+
+  // --- 3. Leaky hooks: stop the thumb, lose the viewer by 15s -------------
+  const hooksWithHold = hooks.filter(g => g.hold15 != null && g.thumbstop > 0);
+  if (hooksWithHold.length >= 2) {
+    const medThumb = median(hooksWithHold.map(g => g.thumbstop));
+    const medRatio = median(hooksWithHold.map(g => g.hold15 / g.thumbstop));
+    hooksWithHold.forEach(g => {
+      const ratio = g.hold15 / g.thumbstop;
+      if (g.thumbstop >= medThumb && ratio <= medRatio * (1 - 0.25)) {
+        insights.push({
+          severity: "warning", tag: "Attention leak",
+          title: `'${g.tag}' hooks viewers but loses them: only ${pct(ratio, 0)} of stopped thumbs survive to 15s`,
+          body: `'${g.tag}' opens strong (${pct(g.thumbstop)} thumbstop, at or above the ${pct(medThumb)} median) but holds only ${pct(g.hold15)} at 15 seconds — a ${pct(ratio, 0)} carry-through vs ${pct(medRatio, 0)} typical. The first 3 seconds write a check the next 12 don't cash: keep the hook, rebuild the body (faster payoff reveal, tighter cut between seconds 3–8) instead of scrapping the concept.`,
+          evidence: [`thumbstop ${pct(g.thumbstop)}`, `hold 15s ${pct(g.hold15)}`, `carry-through ${pct(ratio, 0)} vs median ${pct(medRatio, 0)}`, `${usd(g.spend)} spend, n=${g.nCreatives}`],
+        });
+      }
+    });
+  }
+
+  // --- 4. Native feel: does looking like an ad cost money? ----------------
+  const feels = qualified("native_feel_score").filter(g => g.roas7 != null);
+  if (feels.length >= 2) {
+    const byRoas = [...feels].sort((a, b) => b.roas7 - a.roas7);
+    const best = byRoas[0], worst = byRoas[byRoas.length - 1];
+    if (best.roas7 >= worst.roas7 * (1 + G)) {
+      insights.push({
+        severity: "action", tag: "Native-feel effect",
+        title: `'${best.tag}' creatives out-earn '${worst.tag}' by ${pct(best.roas7 / worst.roas7 - 1, 0)} on D7 ROAS`,
+        body: `${best.tag.replace(/_/g, " ")} creatives run ${pct(best.roas7)} D7 ROAS vs ${pct(worst.roas7)} for ${worst.tag.replace(/_/g, " ")} (thumbstop ${pct(best.thumbstop)} vs ${pct(worst.thumbstop)}). The feed rewards content that belongs in it. Push new briefs toward the native end of the spectrum and reserve obvious-ad polish for placements where it is unavoidable.`,
+        evidence: byRoas.map(g => `${g.tag}: ${pct(g.roas7)} ROAS, ${pct(g.thumbstop)} thumbstop (n=${g.nCreatives})`),
+      });
+    }
+  }
+
+  // --- 5. Tone × ROAS -------------------------------------------------------
+  const tones = qualified("core_tone").filter(g => g.roas7 != null);
+  if (tones.length >= 3) {
+    const byRoas = [...tones].sort((a, b) => b.roas7 - a.roas7);
+    const top = byRoas[0], med = median(tones.map(g => g.roas7));
+    if (top.roas7 >= med * (1 + G)) {
+      insights.push({
+        severity: "info", tag: "Tone insight",
+        title: `'${top.tag}' is the highest-converting emotional register (${pct(top.roas7)} D7 ROAS)`,
+        body: `Creatives built on a ${top.tag.replace(/_/g, " ").toLowerCase()} tone (${top.creatives}) return ${pct(top.roas7)} by D7 against a ${pct(med)} median across tones. Tone is the cheapest variable to test — same footage, different framing — so add a ${top.tag.replace(/_/g, " ").toLowerCase()} variant to every concept currently running a below-median tone.`,
+        evidence: byRoas.slice(0, 4).map(g => `${g.tag}: ${pct(g.roas7)} (n=${g.nCreatives})`),
+      });
+    }
+  }
+
+  // --- 6. The winning recipe: best creative's full tag stack ---------------
+  const proven = joined.filter(c => c.spend >= CONFIG.CREATIVE.MIN_TAG_SPEND && c.roas7 != null);
+  if (proven.length >= 2) {
+    const best = [...proven].sort((a, b) => b.roas7 - a.roas7)[0];
+    if (best.roas7 >= blendedRoas * (1 + G)) {
+      insights.push({
+        severity: "action", tag: "Winning recipe",
+        title: `${best.key} is the creative to clone: ${pct(best.roas7)} D7 ROAS vs ${pct(blendedRoas)} library blend`,
+        body: `Its full stack — ${best.visual_format.replace(/_/g, " ")} format, '${best.hook_type}' hook, ${(best.core_tone || "").replace(/_/g, " ").toLowerCase()} tone, ${(best.cta_type || "").replace(/_/g, " ").toLowerCase()} CTA at ${(best.cta_timing || "").replace(/_/g, " ").toLowerCase()}, ${(best.pacing || "").toLowerCase()} pacing, ${(best.native_feel_score || "").replace(/_/g, " ").toLowerCase()} — is the proven recipe (${usd(best.spend)} spend, ${pct(best.thumbstop)} thumbstop, ${usd(best.cpi, 2)} CPI). Brief 2–3 variants that change exactly ONE ingredient each; that isolates which tag carries the performance.`,
+        evidence: [`ROAS D7 ${pct(best.roas7)}`, `thumbstop ${pct(best.thumbstop)}`, `hold 15s ${pct(best.hold15)}`, `CPI ${usd(best.cpi, 2)}`, `${usd(best.spend)} spend`],
+      });
+    }
+    // --- 7. Fatigue/kill candidate: heavy spend, weak return ---------------
+    const worst = [...proven].sort((a, b) => a.roas7 - b.roas7)[0];
+    if (worst.roas7 <= blendedRoas * 0.5 && worst.spend >= CONFIG.CREATIVE.MIN_TAG_SPEND * 2) {
+      const weakHook = worst.thumbstop != null && worst.thumbstop < CONFIG.CREATIVE.THUMBSTOP_TARGET;
+      insights.push({
+        severity: "critical", tag: "Kill / iterate",
+        title: `${worst.key} burns budget: ${pct(worst.roas7)} D7 ROAS on ${usd(worst.spend)} — half the library blend or worse`,
+        body: `The ${worst.visual_format.replace(/_/g, " ")} / '${worst.hook_type}' / ${(worst.core_tone || "").replace(/_/g, " ").toLowerCase()} combination returns ${pct(worst.roas7)} vs ${pct(blendedRoas)} blended. ${weakHook ? `Its ${pct(worst.thumbstop)} thumbstop (target ≥ ${pct(CONFIG.CREATIVE.THUMBSTOP_TARGET, 0)}) says the failure is at the hook — viewers never enter. Re-cut the first 3 seconds before spending another dollar.` : `Its ${pct(worst.thumbstop)} thumbstop is healthy, so the failure is post-click/mid-funnel — the ad over-promises or the audience is wrong. Pause it; a new opening won't fix conversion.`}`,
+        evidence: [`ROAS D7 ${pct(worst.roas7)} vs blend ${pct(blendedRoas)}`, `thumbstop ${pct(worst.thumbstop)}`, `spend ${usd(worst.spend)}`],
+      });
+    }
+  }
+
+  // --- 8. Language/market read ----------------------------------------------
+  const langs = qualified("language").filter(g => g.roas7 != null);
+  if (langs.length >= 2) {
+    const byRoas = [...langs].sort((a, b) => b.roas7 - a.roas7);
+    const top = byRoas[0], rest = byRoas.slice(1);
+    const restRoas = safeDiv(rest.reduce((a, g) => a + g.rev7, 0), rest.reduce((a, g) => a + g.spend, 0));
+    if (restRoas > 0 && top.roas7 >= restRoas * (1 + G)) {
+      insights.push({
+        severity: "info", tag: "Market insight",
+        title: `${top.tag}-language creatives lead: ${pct(top.roas7)} D7 ROAS vs ${pct(restRoas)} for the rest`,
+        body: `${top.tag} creative${top.nCreatives > 1 ? "s" : ""} (${top.creatives}) monetize ${pct(top.roas7 / restRoas - 1, 0)} better than the rest of the library. Localization depth is likely under-exploited: prioritize native-language variants of proven concepts for this market before net-new ideas.`,
+        evidence: byRoas.map(g => `${g.tag}: ${pct(g.roas7)} (${usd(g.spend)})`),
+      });
+    }
+  }
+
+  const order = { critical: 0, action: 1, warning: 2, opportunity: 3, info: 4 };
+  return insights.sort((a, b) => order[a.severity] - order[b.severity]);
+}
+
+/* ================================================================
+   SECTION 8 — UI PRIMITIVES (Tremor-style)
+   ================================================================ */
+const Card = ({ children, className = "" }) => (
+  <div className={`bg-white rounded-xl border border-slate-200 shadow-sm ${className}`}>{children}</div>
+);
+const CardHeader = ({ title, subtitle }) => (
+  <div className="px-5 pt-4 pb-2">
+    <h3 className="text-sm font-semibold text-slate-900">{title}</h3>
+    {subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}
+  </div>
+);
+const Badge = ({ color, children }) => {
+  const map = {
+    green: "bg-emerald-50 text-emerald-700 ring-emerald-600/20",
+    yellow: "bg-amber-50 text-amber-700 ring-amber-600/20",
+    red: "bg-rose-50 text-rose-700 ring-rose-600/20",
+    blue: "bg-blue-50 text-blue-700 ring-blue-600/20",
+    gray: "bg-slate-100 text-slate-600 ring-slate-500/20",
+    purple: "bg-violet-50 text-violet-700 ring-violet-600/20",
+  };
+  return <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${map[color] || map.gray}`}>{children}</span>;
+};
+
+// Color-coding helpers: green = beats target, amber = within reach, red = off
+const roasColor = v => v == null ? "text-slate-400" : v >= CONFIG.ROAS30.scale ? "text-emerald-600 font-semibold" : v >= CONFIG.ROAS30.maintain ? "text-amber-600" : "text-rose-600 font-semibold";
+const cpiColor  = v => v == null ? "text-slate-400" : v <= CONFIG.CPI_TARGET ? "text-emerald-600" : v <= CONFIG.CPI_TARGET * 1.5 ? "text-amber-600" : "text-rose-600";
+const ctrColor  = v => v == null ? "text-slate-400" : v >= CONFIG.CTR_TARGET ? "text-emerald-600" : v >= CONFIG.CTR_TARGET * 0.5 ? "text-amber-600" : "text-rose-600";
+const retColor  = v => v == null ? "text-slate-400" : v >= CONFIG.D7RET_TARGET ? "text-emerald-600" : v >= CONFIG.D7RET_TARGET * 0.6 ? "text-amber-600" : "text-rose-600";
+const confBadge = t => t === "HIGH" ? <Badge color="green">HIGH</Badge> : t === "MEDIUM" ? <Badge color="yellow">MED</Badge> : <Badge color="gray">LOW</Badge>;
+const verdictBadge = v => ({ SCALE: <Badge color="green">SCALE ▲</Badge>, MAINTAIN: <Badge color="blue">MAINTAIN ▪</Badge>, REDUCE: <Badge color="yellow">REDUCE ▼</Badge>, CUT: <Badge color="red">CUT ✕</Badge> }[v]);
+const sevStyles = {
+  critical: { border: "border-l-rose-500", chip: <Badge color="red">CRITICAL</Badge> },
+  action: { border: "border-l-violet-500", chip: <Badge color="purple">ACTION</Badge> },
+  warning: { border: "border-l-amber-500", chip: <Badge color="yellow">WARNING</Badge> },
+  opportunity: { border: "border-l-emerald-500", chip: <Badge color="green">OPPORTUNITY</Badge> },
+  info: { border: "border-l-blue-400", chip: <Badge color="blue">INFO</Badge> },
+};
+const CHANNEL_COLORS = ["#3b82f6", "#10b981", "#f43f5e", "#8b5cf6", "#f59e0b", "#06b6d4"];
+
+/* --- Generic sortable table --------------------------------------- */
+function useSort(defaultKey) {
+  const [sort, setSort] = useState({ key: defaultKey, dir: -1 });
+  const toggle = key => setSort(s => ({ key, dir: s.key === key ? -s.dir : -1 }));
+  const apply = data => [...data].sort((a, b) => {
+    const va = a[sort.key], vb = b[sort.key];
+    if (va == null) return 1; if (vb == null) return -1;
+    return (va < vb ? -1 : va > vb ? 1 : 0) * -sort.dir;
+  });
+  return { sort, toggle, apply };
+}
+
+function MetricTable({ data, defaultSort = "spend", showChannel = true, showConfidence = true, nameLabel = "Name" }) {
+  const { sort, toggle, apply } = useSort(defaultSort);
+  const Th = ({ k, children, right = true }) => (
+    <th onClick={() => toggle(k)}
+        className={`px-3 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide cursor-pointer select-none hover:text-slate-800 whitespace-nowrap ${right ? "text-right" : "text-left"}`}>
+      {children}{sort.key === k ? (sort.dir === -1 ? " ↓" : " ↑") : ""}
+    </th>
+  );
+  return (
+    <div className="overflow-x-auto">
+      <table className="min-w-full text-sm tabular">
+        <thead className="border-b border-slate-200">
+          <tr>
+            <Th k="key" right={false}>{nameLabel}</Th>
+            {showChannel && <Th k="channel" right={false}>Channel</Th>}
+            <Th k="spend">Spend</Th>
+            <Th k="installs">Installs</Th>
+            <Th k="cpi">CPI</Th>
+            <Th k="ctr">CTR</Th>
+            <Th k="cvr">CVR</Th>
+            <Th k="roas7">ROAS D7</Th>
+            <Th k="projRoas30">ROAS D30*</Th>
+            <Th k="d7ret">D7 Ret</Th>
+            {showConfidence && <Th k="confidence" right={false}>Signal</Th>}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {apply(data).map(r => (
+            <tr key={r.key} className="hover:bg-slate-50">
+              <td className="px-3 py-2 font-medium text-slate-800 whitespace-nowrap">{r.key}</td>
+              {showChannel && <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{r.channel}</td>}
+              <td className="px-3 py-2 text-right">{usd(r.spend)}</td>
+              <td className="px-3 py-2 text-right">{num(r.installs)}</td>
+              <td className={`px-3 py-2 text-right ${cpiColor(r.cpi)}`}>{usd(r.cpi, 2)}</td>
+              <td className={`px-3 py-2 text-right ${ctrColor(r.ctr)}`}>{pct(r.ctr, 2)}</td>
+              <td className="px-3 py-2 text-right text-slate-600">{pct(r.cvr, 3)}</td>
+              <td className={`px-3 py-2 text-right ${roasColor(r.roas7 * 3)}`}>{pct(r.roas7)}</td>
+              <td className={`px-3 py-2 text-right ${roasColor(r.projRoas30)}`}>{pct(r.projRoas30)}</td>
+              <td className={`px-3 py-2 text-right ${retColor(r.d7ret)}`}>{pct(r.d7ret)}</td>
+              {showConfidence && <td className="px-3 py-2">{confBadge(r.confidence)}</td>}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ================================================================
+   SECTION 9 — VIEWS
+   ================================================================ */
+function KpiCard({ label, value, sub, accent }) {
+  return (
+    <Card className="px-5 py-4">
+      <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">{label}</p>
+      <p className={`text-2xl font-semibold mt-1 tabular ${accent || "text-slate-900"}`}>{value}</p>
+      {sub && <p className="text-xs text-slate-500 mt-1">{sub}</p>}
+    </Card>
+  );
+}
+
+function OverviewView({ channels, daily, meta }) {
+  const t = channels.reduce((a, c) => ({
+    spend: a.spend + c.spend, installs: a.installs + c.installs,
+    clicks: a.clicks + c.clicks, imps: a.imps + c.impressions,
+    rev7: a.rev7 + c.rev7, projRev30: a.projRev30 + c.projRev30,
+    projSpend: a.projSpend + c.projSpend,
+  }), { spend: 0, installs: 0, clicks: 0, imps: 0, rev7: 0, projRev30: 0, projSpend: 0 });
+  const blended30 = safeDiv(t.projRev30, t.projSpend);
+  const chartData = channels.map(c => ({ name: c.key, Spend: Math.round(c.spend), CPI: +(c.cpi || 0).toFixed(2), "proj. D30 ROAS %": +((c.projRoas30 || 0) * 100).toFixed(1) }));
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <KpiCard label="Total Spend" value={usd(t.spend)}
+                 sub={meta.outageSpend > 0 ? `+ ${usd(meta.outageSpend)} wasted/outage spend (excluded from rates)` : `${meta.minDate} → ${meta.maxDate}`} />
+        <KpiCard label="Installs" value={num(t.installs)} sub={`${num(t.clicks)} clicks`} />
+        <KpiCard label="Blended CPI" value={usd(safeDiv(t.spend, t.installs), 2)} sub={`target ≤ ${usd(CONFIG.CPI_TARGET,2)}`} accent={cpiColor(safeDiv(t.spend, t.installs))} />
+        <KpiCard label="Blended CTR" value={pct(safeDiv(t.clicks, t.imps), 2)} sub={`target ≥ ${pct(CONFIG.CTR_TARGET,0)}`} />
+        <KpiCard label="ROAS D7" value={pct(safeDiv(t.rev7, t.spend))} sub="revenue recovered in 7 days" />
+        <KpiCard label="proj. ROAS D30" value={pct(blended30)} sub="breakeven = 100%" accent={roasColor(blended30)} />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Card>
+          <CardHeader title="Channel Spend vs CPI" subtitle="Bars: quarterly spend ($, left) · Line: cost per install ($, right)" />
+          <div className="px-3 pb-4" style={{ height: 300 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <XAxis dataKey="name" tick={{ fontSize: 12 }} />
+                <YAxis yAxisId="l" tickFormatter={v => "$" + (v / 1000) + "k"} tick={{ fontSize: 11 }} />
+                <YAxis yAxisId="r" orientation="right" tickFormatter={v => "$" + v} tick={{ fontSize: 11 }} />
+                <Tooltip formatter={(v, n) => n === "Spend" ? usd(v) : n === "CPI" ? usd(v, 2) : v} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Bar yAxisId="l" dataKey="Spend" radius={[6, 6, 0, 0]}>
+                  {chartData.map((_, i) => <Cell key={i} fill={CHANNEL_COLORS[i % CHANNEL_COLORS.length]} fillOpacity={0.85} />)}
+                </Bar>
+                <Line yAxisId="r" dataKey="CPI" stroke="#0f172a" strokeWidth={2} dot={{ r: 4 }} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+
+        <Card>
+          <CardHeader title="Daily D7 ROAS Trend by Channel" subtitle="7-day trailing average, % of spend recovered within 7 days" />
+          <div className="px-3 pb-4" style={{ height: 300 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={daily} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <XAxis dataKey="date" tick={{ fontSize: 10 }} interval={13} />
+                <YAxis tickFormatter={v => v + "%"} tick={{ fontSize: 11 }} />
+                <Tooltip formatter={v => v + "%"} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                {channels.map((c, i) => (
+                  <Line key={c.key} dataKey={c.key} stroke={CHANNEL_COLORS[i % CHANNEL_COLORS.length]} strokeWidth={2} dot={false} connectNulls />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader title="Channel Performance" subtitle="ROAS D30* = observed matured D30 revenue + projected immature cohorts. Attribution windows differ per channel — see Insights." />
+        <MetricTable data={channels} showChannel={false} nameLabel="Channel" />
+        <div className="px-5 py-3 border-t border-slate-100 text-xs text-slate-500">
+          Color legend: <span className="text-emerald-600 font-medium">green ≥ target</span> · <span className="text-amber-600 font-medium">amber near target</span> · <span className="text-rose-600 font-medium">red off target</span>.
+          Targets: proj. D30 ROAS ≥ {pct(CONFIG.ROAS30.scale,0)} (breakeven), CPI ≤ {usd(CONFIG.CPI_TARGET,2)}, CTR ≥ {pct(CONFIG.CTR_TARGET,0)}, D7 retention ≥ {pct(CONFIG.D7RET_TARGET,0)}.
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function PerformanceView({ campaigns, adsets }) {
+  const [campaignFilter, setCampaignFilter] = useState("ALL");
+  const filtered = campaignFilter === "ALL" ? adsets : adsets.filter(a => a.campaign === campaignFilter);
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader title="Campaign Performance" subtitle="Click any column to sort. Signal = statistical trust tier (see Audit Log for definition)." />
+        <MetricTable data={campaigns} nameLabel="Campaign" />
+      </Card>
+      <Card>
+        <div className="flex items-center justify-between px-5 pt-4 pb-2">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">Adset Performance</h3>
+            <p className="text-xs text-slate-500 mt-0.5">{filtered.length} adsets shown</p>
+          </div>
+          <select value={campaignFilter} onChange={e => setCampaignFilter(e.target.value)}
+                  className="text-sm border border-slate-300 rounded-lg px-3 py-1.5 bg-white text-slate-700">
+            <option value="ALL">All campaigns</option>
+            {campaigns.map(c => <option key={c.key} value={c.key}>{c.key}</option>)}
+          </select>
+        </div>
+        <MetricTable data={filtered} nameLabel="Adset" />
+      </Card>
+    </div>
+  );
+}
+
+function AuditView({ audit, meta }) {
+  const sevChip = s => s === "error" ? <Badge color="red">ISSUE</Badge> : s === "warn" ? <Badge color="yellow">CLEANED</Badge> : <Badge color="green">CHECK PASSED</Badge>;
+  return (
+    <div className="space-y-4">
+      <Card className="p-5">
+        <h3 className="text-sm font-semibold text-slate-900">What counts as a trustworthy signal?</h3>
+        <p className="text-sm text-slate-600 mt-2 leading-relaxed">
+          Every campaign/adset gets a confidence tier from its volume: margin of error on unit economics is estimated
+          as <span className="font-mono text-xs bg-slate-100 px-1 rounded">1.96 / √installs</span> (95% interval, assuming revenue-per-install
+          variance ≈ mean). <strong>HIGH</strong> = ≥ {usd(CONFIG.TRUST.HIGH.minSpend)} spend and ±{pct(CONFIG.TRUST.HIGH.maxMoe,0)} MoE (decision-grade: can be scaled or killed on its own numbers).{" "}
+          <strong>MEDIUM</strong> = ≥ {usd(CONFIG.TRUST.MEDIUM.minSpend)} and ±{pct(CONFIG.TRUST.MEDIUM.maxMoe,0)} (directional).{" "}
+          <strong>LOW</strong> = anything weaker — never scaled and never permanently killed on its own data; it simply loses budget priority.
+          All rate metrics (CPI, CTR, CVR, ROAS) are recomputed from raw counts; pre-computed columns in the CSV are ignored.
+        </p>
+      </Card>
+      <Card className="p-5">
+        <h3 className="text-sm font-semibold text-slate-900">Cleaning summary</h3>
+        <p className="text-sm text-slate-600 mt-1">
+          {num(meta.rawCount)} raw rows → <strong>{num(meta.cleanCount)} clean rows</strong> ({num(meta.rawCount - meta.cleanCount)} removed).
+          {meta.outageCount > 0 && <> <strong>{usd(meta.outageSpend)}</strong> of Wasted/Outage Spend ({meta.outageCount} rows with spend but zero installs) stays in the financial ledger but out of every rate metric.</>}
+          {meta.refundCount > 0 && <> Platform refund credits of <strong>{usd(meta.refundTotal)}</strong> ({meta.refundCount} rows) tracked separately — real money back, but excluded from rate metrics.</>}
+          {" "}Data window {meta.minDate} → {meta.maxDate} ({meta.monthCount} month{meta.monthCount > 1 ? "s" : ""}).
+        </p>
+      </Card>
+      <div className="space-y-3">
+        {audit.map((a, i) => (
+          <Card key={i} className="p-4">
+            <div className="flex items-start gap-3">
+              <div className="pt-0.5">{sevChip(a.severity)}</div>
+              <div className="flex-1">
+                <div className="flex items-baseline justify-between gap-4">
+                  <h4 className="text-sm font-semibold text-slate-800">{a.title}</h4>
+                  <span className="text-sm tabular text-slate-500 whitespace-nowrap">{a.count > 0 ? `${num(a.count)} rows` : ""}</span>
+                </div>
+                <p className="text-xs text-slate-500 mt-1"><span className="font-semibold text-slate-700">Action:</span> {a.action}</p>
+                <p className="text-xs text-slate-500 mt-1">{a.detail}</p>
+                {a.samples && a.samples.length > 0 && (
+                  <div className="mt-2 text-xs font-mono bg-slate-50 border border-slate-100 rounded-lg p-2 text-slate-600">
+                    {a.samples.map((s, j) => <div key={j}>· {s}</div>)}
+                  </div>
+                )}
+              </div>
+            </div>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function InsightsView({ insights }) {
+  return (
+    <div className="space-y-3">
+      {insights.map((ins, i) => {
+        const st = sevStyles[ins.severity];
+        return (
+          <Card key={i} className={`p-4 border-l-4 ${st.border}`}>
+            <div className="flex items-center gap-2 flex-wrap">
+              {st.chip}<Badge color="gray">{ins.tag}</Badge>
+            </div>
+            <h4 className="text-sm font-semibold text-slate-900 mt-2">{ins.title}</h4>
+            <p className="text-sm text-slate-600 mt-1 leading-relaxed">{ins.body}</p>
+            <div className="flex flex-wrap gap-2 mt-3">
+              {ins.evidence.map((e, j) => (
+                <span key={j} className="text-xs tabular bg-slate-100 text-slate-600 rounded-md px-2 py-0.5">{e}</span>
+              ))}
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+function BudgetView({ plan }) {
+  const [open, setOpen] = useState(null);
+  const chartData = plan.items.map(i => ({
+    name: i.key, Current: Math.round(i.monthlySpend), Proposed: Math.round(i.alloc),
+  }));
+  const groups = ["SCALE", "MAINTAIN", "REDUCE", "CUT"];
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <KpiCard label="Monthly Budget" value={usd(CONFIG.MONTHLY_BUDGET)} sub="next quarter, per month" />
+        <KpiCard label="Allocated" value={usd(plan.allocated)} sub={plan.leftover > 1 ? `${usd(plan.leftover)} held as testing reserve` : "fully deployed"} />
+        <KpiCard label="Expected D7 ROAS" value={pct(plan.blendedRoas7)} sub="weighted by allocation" />
+        <KpiCard label="Expected proj. D30 ROAS" value={pct(plan.planRoas)} sub="vs breakeven 100%" accent={roasColor(plan.planRoas)} />
+      </div>
+
+      <Card>
+        <CardHeader title="Current vs Proposed Monthly Spend" subtitle="Two-stage allocation: demand-capture campaigns (brand/retargeting) are funded first but hard-capped at historical volume — their inventory is bounded by organic brand demand and the retargeting pool. Every remaining dollar water-fills prospecting campaigns by projected D30 ROAS, because prospecting creates the new demand the ecosystem runs on." />
+        <div className="px-3 pb-4" style={{ height: 340 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chartData} layout="vertical" margin={{ top: 5, right: 30, left: 40, bottom: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+              <XAxis type="number" tickFormatter={v => "$" + (v / 1000) + "k"} tick={{ fontSize: 11 }} />
+              <YAxis type="category" dataKey="name" width={150} tick={{ fontSize: 11 }} />
+              <Tooltip formatter={v => usd(v)} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Bar dataKey="Current" fill="#cbd5e1" radius={[0, 4, 4, 0]} />
+              <Bar dataKey="Proposed" fill="#3b82f6" radius={[0, 4, 4, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </Card>
+
+      {groups.map(g => {
+        const rows = plan.items.filter(i => i.verdict === g);
+        if (!rows.length) return null;
+        return (
+          <Card key={g}>
+            <CardHeader title={<span>{verdictBadge(g)} <span className="ml-2">{rows.length} campaign{rows.length > 1 ? "s" : ""} · {usd(rows.reduce((a, r) => a + r.alloc, 0))}/mo</span></span>} />
+            <div className="divide-y divide-slate-100">
+              {rows.map(i => (
+                <div key={i.key} className="px-5 py-3">
+                  <div className="flex items-center justify-between gap-4 cursor-pointer" onClick={() => setOpen(open === i.key ? null : i.key)}>
+                    <div className="flex items-center gap-3 min-w-0 flex-wrap">
+                      <span className="font-medium text-sm text-slate-800 truncate">{i.key}</span>
+                      <span className="text-xs text-slate-400">{i.channel}</span>
+                      {i.isDC ? <Badge color="purple">DEMAND CAPTURE</Badge> : <Badge color="blue">PROSPECTING</Badge>}
+                      {confBadge(i.confidence)}
+                    </div>
+                    <div className="flex items-center gap-4 text-sm tabular whitespace-nowrap">
+                      <span className="text-slate-400">{usd(i.monthlySpend, 0)}/mo</span>
+                      <span className="text-slate-400">→</span>
+                      <span className={`font-semibold ${i.alloc > i.monthlySpend ? "text-emerald-600" : i.alloc === 0 ? "text-rose-600" : "text-slate-800"}`}>{usd(i.alloc, 0)}/mo</span>
+                      <span className="text-xs text-slate-400 w-4">{open === i.key ? "▾" : "▸"}</span>
+                    </div>
+                  </div>
+                  {open === i.key && (
+                    <div className="mt-3 text-sm text-slate-600 bg-slate-50 rounded-lg p-3 leading-relaxed">
+                      <p><span className="font-semibold text-slate-800">Why:</span> {i.why}</p>
+                      <div className="flex flex-wrap gap-2 mt-2">
+                        <span className="text-xs tabular bg-white border border-slate-200 rounded px-2 py-0.5">proj. D30 ROAS {pct(i.projRoas30)}</span>
+                        <span className="text-xs tabular bg-white border border-slate-200 rounded px-2 py-0.5">D7 ROAS {pct(i.roas7)}</span>
+                        <span className="text-xs tabular bg-white border border-slate-200 rounded px-2 py-0.5">CPI {usd(i.cpi, 2)}</span>
+                        <span className="text-xs tabular bg-white border border-slate-200 rounded px-2 py-0.5">D7 retention {pct(i.d7ret)}</span>
+                        <span className="text-xs tabular bg-white border border-slate-200 rounded px-2 py-0.5">{num(i.installs)} installs · ±{pct(i.moe)}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </Card>
+        );
+      })}
+
+      <Card className="p-5">
+        <h3 className="text-sm font-semibold text-slate-900">30 / 60 / 90-Day Revisit Plan</h3>
+        <p className="text-xs text-slate-500 mt-1">Thresholds below are computed from each campaign's current metrics — they are the specific tripwires at which this plan is wrong and must be revised.</p>
+        {["d30", "d60", "d90"].map(k => (
+          <div key={k} className="mt-4">
+            <h4 className="text-sm font-semibold text-slate-800">{plan.checkpoints[k].title}</h4>
+            <div className="mt-2 space-y-2">
+              {plan.checkpoints[k].rules.map((r, i) => (
+                <div key={i} className="text-sm text-slate-600 bg-slate-50 rounded-lg px-3 py-2">
+                  <span className="font-medium text-slate-800">{r.campaign}: </span>{r.rule}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </Card>
+    </div>
+  );
+}
+
+/* ================================================================
+   SECTION 9B — CREATIVE LIBRARY VIEW (Part 2)
+   ================================================================ */
+const thumbColor = v => v == null ? "text-slate-400" : v >= CONFIG.CREATIVE.THUMBSTOP_TARGET ? "text-emerald-600" : v >= CONFIG.CREATIVE.THUMBSTOP_TARGET * 0.6 ? "text-amber-600" : "text-rose-600";
+const holdColor  = v => v == null ? "text-slate-400" : v >= CONFIG.CREATIVE.HOLD15_TARGET ? "text-emerald-600" : v >= CONFIG.CREATIVE.HOLD15_TARGET * 0.6 ? "text-amber-600" : "text-rose-600";
+
+function CreativeTable({ data }) {
+  const { sort, toggle, apply } = useSort("spend");
+  const Th = ({ k, children, right = true }) => (
+    <th onClick={() => toggle(k)}
+        className={`px-3 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wide cursor-pointer select-none hover:text-slate-800 whitespace-nowrap ${right ? "text-right" : "text-left"}`}>
+      {children}{sort.key === k ? (sort.dir === -1 ? " ↓" : " ↑") : ""}
+    </th>
+  );
+  return (
+    <div className="overflow-x-auto">
+      <table className="min-w-full text-sm tabular">
+        <thead className="border-b border-slate-200">
+          <tr>
+            <Th k="key" right={false}>Creative</Th>
+            <Th k="promoted_product" right={false}>Product</Th>
+            <Th k="visual_format" right={false}>Visual Format</Th>
+            <Th k="hook_type" right={false}>Hook</Th>
+            <Th k="core_tone" right={false}>Tone</Th>
+            <Th k="spend">Spend</Th>
+            <Th k="cpi">CPI</Th>
+            <Th k="thumbstop">Thumbstop 3s</Th>
+            <Th k="hold15">Hold 15s</Th>
+            <Th k="roas7">ROAS D7</Th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {apply(data).map(c => (
+            <tr key={c.key} className="hover:bg-slate-50">
+              <td className="px-3 py-2 font-medium text-slate-800 whitespace-nowrap">{c.key}</td>
+              <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{c.promoted_product}</td>
+              <td className="px-3 py-2 whitespace-nowrap"><Badge color="blue">{c.visual_format}</Badge></td>
+              <td className="px-3 py-2 whitespace-nowrap"><Badge color="purple">{c.hook_type}</Badge></td>
+              <td className="px-3 py-2 whitespace-nowrap"><Badge color="gray">{c.core_tone}</Badge></td>
+              <td className="px-3 py-2 text-right">{usd(c.spend)}</td>
+              <td className={`px-3 py-2 text-right ${cpiColor(c.cpi)}`}>{usd(c.cpi, 2)}</td>
+              <td className={`px-3 py-2 text-right ${thumbColor(c.thumbstop)}`}>{pct(c.thumbstop)}</td>
+              <td className={`px-3 py-2 text-right ${holdColor(c.hold15)}`}>{pct(c.hold15)}</td>
+              <td className={`px-3 py-2 text-right ${roasColor(c.roas7 * 3)}`}>{pct(c.roas7)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CreativeLibraryView({ cm }) {
+  const { joined, dims, insights, report } = cm;
+  const spend = joined.reduce((a, c) => a + c.spend, 0);
+  const installs = joined.reduce((a, c) => a + c.installs, 0);
+  const rev7 = joined.reduce((a, c) => a + c.rev7, 0);
+  const imps = joined.reduce((a, c) => a + c.impressions, 0);
+  const wThumb = safeDiv(joined.reduce((a, c) => a + (c.thumbstop || 0) * c.impressions, 0), imps);
+  const wHold = safeDiv(joined.reduce((a, c) => a + (c.hold15 || 0) * c.impressions, 0), imps);
+
+  const fmtChart = dims.visual_format.map(g => ({ name: g.tag, "ROAS D7 %": +((g.roas7 || 0) * 100).toFixed(1), n: g.nCreatives }))
+    .sort((a, b) => b["ROAS D7 %"] - a["ROAS D7 %"]);
+  const hookChart = dims.hook_type.map(g => ({ name: g.tag, "Thumbstop 3s %": +((g.thumbstop || 0) * 100).toFixed(1), n: g.nCreatives }))
+    .sort((a, b) => b["Thumbstop 3s %"] - a["Thumbstop 3s %"]);
+
+  const joinIssues = report.untagged.length > 0 || report.noPerf.length > 0 || report.droppedInvalid > 0;
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <KpiCard label="Creatives Matched" value={`${joined.length} / ${creativeTagsDB.length}`} sub="joined to tag DB" />
+        <KpiCard label="Creative Spend" value={usd(spend)} />
+        <KpiCard label="Blended CPI" value={usd(safeDiv(spend, installs), 2)} accent={cpiColor(safeDiv(spend, installs))} />
+        <KpiCard label="Thumbstop 3s" value={pct(wThumb)} sub={`target ≥ ${pct(CONFIG.CREATIVE.THUMBSTOP_TARGET, 0)}`} accent={thumbColor(wThumb)} />
+        <KpiCard label="Hold 15s" value={pct(wHold)} sub={`target ≥ ${pct(CONFIG.CREATIVE.HOLD15_TARGET, 0)}`} accent={holdColor(wHold)} />
+        <KpiCard label="ROAS D7" value={pct(safeDiv(rev7, spend))} sub="library blended" />
+      </div>
+
+      {joinIssues && (
+        <Card className="p-4 border-l-4 border-l-amber-500">
+          <div className="flex items-center gap-2"><Badge color="yellow">JOIN REPORT</Badge></div>
+          <p className="text-sm text-slate-600 mt-2 leading-relaxed">
+            {report.droppedInvalid > 0 && <>Dropped {report.droppedInvalid} structurally invalid row{report.droppedInvalid > 1 ? "s" : ""} (missing creative_id or spend). </>}
+            {report.untagged.length > 0 && <>Excluded performance rows for <strong>{report.untagged.join(", ")}</strong> — no entry in the tag DB (inner join). Run the tagging pipeline on {report.untagged.length > 1 ? "these creatives" : "this creative"} to include {report.untagged.length > 1 ? "them" : "it"}. </>}
+            {report.noPerf.length > 0 && <>Tagged but absent from this CSV: <strong>{report.noPerf.join(", ")}</strong> — either not live this period or missing from the export.</>}
+          </p>
+        </Card>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Card>
+          <CardHeader title="D7 ROAS by Visual Format" subtitle="Blended (Σ revenue / Σ spend) per format — production budget should follow the tall bars" />
+          <div className="px-3 pb-4" style={{ height: 300 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={fmtChart} layout="vertical" margin={{ top: 5, right: 30, left: 30, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+                <XAxis type="number" tickFormatter={v => v + "%"} tick={{ fontSize: 11 }} />
+                <YAxis type="category" dataKey="name" width={140} tick={{ fontSize: 11 }} />
+                <Tooltip formatter={(v, n, p) => [`${v}% (n=${p.payload.n})`, "ROAS D7"]} />
+                <Bar dataKey="ROAS D7 %" radius={[0, 4, 4, 0]}>
+                  {fmtChart.map((_, i) => <Cell key={i} fill={CHANNEL_COLORS[i % CHANNEL_COLORS.length]} fillOpacity={0.85} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+        <Card>
+          <CardHeader title="3s Thumbstop Rate by Hook Type" subtitle="Impression-weighted — which openings actually stop the scroll" />
+          <div className="px-3 pb-4" style={{ height: 300 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={hookChart} layout="vertical" margin={{ top: 5, right: 30, left: 30, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+                <XAxis type="number" tickFormatter={v => v + "%"} tick={{ fontSize: 11 }} />
+                <YAxis type="category" dataKey="name" width={160} tick={{ fontSize: 11 }} />
+                <Tooltip formatter={(v, n, p) => [`${v}% (n=${p.payload.n})`, "Thumbstop 3s"]} />
+                <Bar dataKey="Thumbstop 3s %" radius={[0, 4, 4, 0]}>
+                  {hookChart.map((d, i) => <Cell key={i} fill={d["Thumbstop 3s %"] >= CONFIG.CREATIVE.THUMBSTOP_TARGET * 100 ? "#10b981" : "#94a3b8"} fillOpacity={0.85} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader title="Creative Performance Grid" subtitle="Joined performance + AI taxonomy tags. Click any column to sort." />
+        <CreativeTable data={joined} />
+        <div className="px-5 py-3 border-t border-slate-100 text-xs text-slate-500">
+          Targets: thumbstop ≥ {pct(CONFIG.CREATIVE.THUMBSTOP_TARGET, 0)}, hold 15s ≥ {pct(CONFIG.CREATIVE.HOLD15_TARGET, 0)}, CPI ≤ {usd(CONFIG.CPI_TARGET, 2)}. Rates are impression-weighted across each creative's rows.
+        </div>
+      </Card>
+
+      <Card className="p-1">
+        <CardHeader title={`Automated Tag Insights (${insights.length})`} subtitle={`Computed from weighted tag-group aggregates; a group needs ≥ ${usd(CONFIG.CREATIVE.MIN_TAG_SPEND)} spend to be quoted, and comparisons fire only past a ${pct(CONFIG.CREATIVE.MIN_REL_GAP, 0)} relative gap.`} />
+        <div className="p-3"><InsightsView insights={insights} /></div>
+      </Card>
+    </div>
+  );
+}
+
+/* ================================================================
+   SECTION 10 — APP SHELL (upload, pipeline, tabs)
+   ================================================================ */
+// Shared CSV parsing — every upload path funnels through the same router
+function parseCSVFile(file, onData) {
+  Papa.parse(file, {
+    header: true, skipEmptyLines: true,
+    complete: res => onData(res.data, res.errors),
+    error: err => onData(null, [{ row: 0, message: err.message }]),
+  });
+}
+
+function DropZone({ onData, compact }) {
+  const [drag, setDrag] = useState(false);
+  const inputRef = useRef(null);
+  return (
+    <div
+      onDragOver={e => { e.preventDefault(); setDrag(true); }}
+      onDragLeave={() => setDrag(false)}
+      onDrop={e => { e.preventDefault(); setDrag(false); e.dataTransfer.files[0] && parseCSVFile(e.dataTransfer.files[0], onData); }}
+      onClick={() => inputRef.current.click()}
+      className={`border-2 border-dashed rounded-2xl ${compact ? "p-8" : "p-16"} text-center cursor-pointer transition-colors ${drag ? "border-blue-400 bg-blue-50" : "border-slate-300 bg-white hover:border-slate-400"}`}>
+      <div className={`${compact ? "text-2xl mb-2" : "text-4xl mb-3"}`}>📊</div>
+      <p className="text-sm font-medium text-slate-700">Drop a CSV here, or click to browse</p>
+      <p className="text-xs text-slate-400 mt-2">
+        Campaign schema ({REQUIRED_COLUMNS.slice(0, 4).join(", ")}, …) → performance & budget views ·
+        Creative schema (creative_id, thumbstop_rate_3s, …) → Creative Library
+      </p>
+      <input ref={inputRef} type="file" accept=".csv" className="hidden" onChange={e => e.target.files[0] && parseCSVFile(e.target.files[0], onData)} />
+    </div>
+  );
+}
+
+function FileDrop({ onData, error }) {
+  return (
+    <div className="max-w-2xl mx-auto mt-24 px-4">
+      <div className="text-center mb-8">
+        <h1 className="text-2xl font-bold text-slate-900">UA Command Center</h1>
+        <p className="text-slate-500 mt-2 text-sm">Drop a quarterly campaign CSV for the audit, insight, and {usd(CONFIG.MONTHLY_BUDGET)}/month budget engine — or a creative performance CSV for the tagged Creative Library. The file is routed automatically by its columns.</p>
+      </div>
+      <DropZone onData={onData} />
+      {error && <div className="mt-4 bg-rose-50 border border-rose-200 text-rose-700 text-sm rounded-xl p-4">{error}</div>}
+    </div>
+  );
+}
+
+// Shown inside a tab whose data source hasn't been uploaded yet
+function MissingData({ message, onData, error }) {
+  return (
+    <div className="max-w-2xl mx-auto mt-8">
+      <p className="text-sm text-slate-500 text-center mb-4">{message}</p>
+      <DropZone onData={onData} compact />
+      {error && <div className="mt-4 bg-rose-50 border border-rose-200 text-rose-700 text-sm rounded-xl p-4">{error}</div>}
+    </div>
+  );
+}
+
+function App() {
+  const [campaignRaw, setCampaignRaw] = useState(null);  // { data, errors }
+  const [creativeRaw, setCreativeRaw] = useState(null);  // { data, errors }
+  const [tab, setTab] = useState("overview");
+  const [error, setError] = useState(null);
+  const uploadRef = useRef(null);
+
+  // ---- Smart CSV router: inspect headers, dispatch to the right model ----
+  const onData = useCallback((data, errors) => {
+    if (!data || !data.length) { setError("Could not parse any rows from that file."); return; }
+    const cols = Object.keys(data[0]).map(c => c.trim());
+    const isCreative = cols.includes("creative_id") && cols.some(c => /thumbstop/i.test(c));
+    const isCampaign = cols.includes("campaign") && cols.includes("date") && cols.some(c => /spend/i.test(c));
+    if (isCreative) { setError(null); setCreativeRaw({ data, errors }); setTab("creative"); }
+    else if (isCampaign) { setError(null); setCampaignRaw({ data, errors }); setTab("overview"); }
+    else setError(`Unrecognized CSV schema. Expected either campaign data (${REQUIRED_COLUMNS.slice(0, 5).join(", ")}, …) or creative data (creative_id, thumbstop_rate_3s, …). This file has: ${cols.slice(0, 8).join(", ")}${cols.length > 8 ? ", …" : ""}`);
+  }, []);
+
+  // Expose for programmatic loading/testing (e.g. automated QA)
+  window.__loadCSVText = text => {
+    const res = Papa.parse(text, { header: true, skipEmptyLines: true });
+    onData(res.data, res.errors);
+  };
+
+  // ---- Campaign pipeline (Part 1 — unchanged), memoized ----
+  const model = useMemo(() => {
+    if (!campaignRaw) return null;
+    const cleaned = cleanData(campaignRaw.data, campaignRaw.errors);
+    if (cleaned.fatal) return { fatal: cleaned.fatal };
+    const { rows, audit, meta } = cleaned;
+    const mult = computeMultipliers(rows);
+    const channels = aggregateBy(rows, r => r.channel, mult, meta.monthCount);
+    const campaigns = aggregateBy(rows, r => r.campaign, mult, meta.monthCount);
+    const adsets = aggregateBy(rows, r => r.adset, mult, meta.monthCount);
+    const insights = generateInsights({ campaigns, channels, adsets, rows, meta, mult });
+    const plan = buildBudgetPlan(campaigns, meta);
+    const daily = dailyRoasSeries(rows);
+    return { rows, audit, meta, mult, channels, campaigns, adsets, insights, plan, daily };
+  }, [campaignRaw]);
+
+  // ---- Creative pipeline (Part 2), memoized ----
+  const creativeModel = useMemo(() => creativeRaw ? buildCreativeModel(creativeRaw.data) : null, [creativeRaw]);
+
+  if (!campaignRaw && !creativeRaw) return <FileDrop onData={onData} error={error} />;
+
+  const okModel = model && !model.fatal ? model : null;
+  const okCreative = creativeModel && !creativeModel.fatal ? creativeModel : null;
+  const cleanedCount = okModel ? okModel.audit.filter(a => a.severity !== "info").reduce((a, x) => a + x.count, 0) : 0;
+  const tabs = [
+    ["overview", "Overview"],
+    ["performance", "Performance"],
+    ["audit", okModel && cleanedCount ? `Audit Log (${cleanedCount})` : "Audit Log"],
+    ["insights", okModel ? `Insights (${okModel.insights.length})` : "Insights"],
+    ["budget", "Budget Plan"],
+    ["creative", okCreative ? `Creative Library (${okCreative.joined.length})` : "Creative Library"],
+  ];
+  const subtitle = [
+    okModel ? `Campaigns: ${okModel.meta.minDate} → ${okModel.meta.maxDate} · ${num(okModel.meta.cleanCount)} clean rows · ${okModel.channels.length} channels · ${okModel.campaigns.length} campaigns` : null,
+    okCreative ? `Creatives: ${okCreative.joined.length} matched to tag DB · ${usd(okCreative.joined.reduce((a, c) => a + c.spend, 0))} spend` : null,
+  ].filter(Boolean).join("  ·  ");
+
+  const campaignMissing = (
+    <MissingData onData={onData}
+      message={model && model.fatal ? model.fatal : "No campaign CSV loaded yet — drop the quarterly campaign export to unlock this view."}
+      error={error} />
+  );
+
+  return (
+    <div className="max-w-7xl mx-auto px-4 py-6">
+      <div className="flex items-center justify-between flex-wrap gap-3 mb-5">
+        <div>
+          <h1 className="text-xl font-bold text-slate-900">UA Command Center</h1>
+          <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>
+        </div>
+        <button onClick={() => uploadRef.current.click()}
+                className="text-sm text-slate-600 border border-slate-300 rounded-lg px-3 py-1.5 bg-white hover:bg-slate-50">
+          ⬆ Upload CSV
+        </button>
+        <input ref={uploadRef} type="file" accept=".csv" className="hidden"
+               onChange={e => { e.target.files[0] && parseCSVFile(e.target.files[0], onData); e.target.value = ""; }} />
+      </div>
+
+      <div className="flex gap-1 mb-5 bg-slate-100 rounded-xl p-1 w-fit flex-wrap">
+        {tabs.map(([id, label]) => (
+          <button key={id} onClick={() => setTab(id)}
+                  className={`px-4 py-1.5 text-sm rounded-lg transition-colors ${tab === id ? "bg-white shadow-sm font-medium text-slate-900" : "text-slate-500 hover:text-slate-800"}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {error && <div className="mb-4 bg-rose-50 border border-rose-200 text-rose-700 text-sm rounded-xl p-4">{error}</div>}
+
+      {tab === "overview" && (okModel ? <OverviewView channels={okModel.channels} daily={okModel.daily} meta={okModel.meta} /> : campaignMissing)}
+      {tab === "performance" && (okModel ? <PerformanceView campaigns={okModel.campaigns} adsets={okModel.adsets} /> : campaignMissing)}
+      {tab === "audit" && (okModel ? <AuditView audit={okModel.audit} meta={okModel.meta} /> : campaignMissing)}
+      {tab === "insights" && (okModel ? <InsightsView insights={okModel.insights} /> : campaignMissing)}
+      {tab === "budget" && (okModel ? <BudgetView plan={okModel.plan} /> : campaignMissing)}
+      {tab === "creative" && (okCreative ? <CreativeLibraryView cm={okCreative} /> :
+        <MissingData onData={onData}
+          message={creativeModel && creativeModel.fatal ? creativeModel.fatal : "No creative performance CSV loaded yet — drop an export with creative_id and thumbstop_rate_3s columns to populate the Creative Library."}
+          error={error} />)}
+
+      <p className="text-center text-xs text-slate-400 mt-8 pb-4">
+        All verdicts derive from CONFIG thresholds at the top of the source — edit them there to change the judgment rules. Nothing is hardcoded to this quarter's data.
+      </p>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
