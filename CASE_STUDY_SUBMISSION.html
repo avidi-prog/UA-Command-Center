@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>kitUP UA Command Center — Case Study Submission</title>
+<style>
+  /* ============ PREMIUM GROWTH-REPORT STYLING ============ */
+  :root {
+    --navy: #1e293b;        /* dark slate headers */
+    --navy-deep: #0f172a;
+    --emerald: #059669;     /* positive metrics */
+    --crimson: #b91c1c;     /* costs / cuts */
+    --ink: #1f2937;
+    --muted: #64748b;
+    --line: #e2e8f0;
+    --wash: #f8fafc;
+  }
+  * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: Helvetica, Arial, "Segoe UI", sans-serif;
+    color: var(--ink);
+    font-size: 11.5pt;
+    line-height: 1.55;
+    background: #eef1f5;
+  }
+  .page-wrap { max-width: 900px; margin: 0 auto; background: #fff; padding: 48px 64px; box-shadow: 0 2px 24px rgba(15,23,42,.08); }
+
+  h1, h2, h3, h4 { font-family: Helvetica, Arial, sans-serif; color: var(--navy-deep); line-height: 1.25; }
+  h2 { font-size: 19pt; margin: 0 0 6px; letter-spacing: -0.02em; }
+  h3 { font-size: 13.5pt; margin: 28px 0 8px; color: var(--navy); }
+  p  { margin: 0 0 12px; }
+  strong { color: var(--navy-deep); }
+  em { color: var(--muted); }
+
+  .kicker { font-size: 9pt; font-weight: bold; letter-spacing: .18em; text-transform: uppercase; color: var(--emerald); margin-bottom: 8px; }
+  .section-rule { height: 3px; background: linear-gradient(90deg, var(--navy) 0%, var(--emerald) 100%); border: 0; margin: 10px 0 24px; }
+
+  .pos { color: var(--emerald); font-weight: bold; }
+  .neg { color: var(--crimson); font-weight: bold; }
+
+  /* ---- Cover ---- */
+  .cover { padding: 120px 64px 80px; min-height: 92vh; display: flex; flex-direction: column; justify-content: space-between; background: #fff; }
+  .cover .brand { font-size: 9pt; letter-spacing: .22em; text-transform: uppercase; color: var(--muted); }
+  .cover h1 { font-size: 30pt; letter-spacing: -0.02em; margin: 18px 0 10px; color: var(--navy-deep); }
+  .cover .subtitle { font-size: 13pt; color: var(--muted); max-width: 34em; }
+  .cover-meta { border-top: 2px solid var(--navy-deep); margin-top: 48px; padding-top: 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px 32px; font-size: 10pt; }
+  .cover-meta div span { display: block; font-size: 8pt; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
+  .cover-accent { width: 64px; height: 6px; background: var(--emerald); margin-top: 14px; }
+
+  /* ---- Pull quote ---- */
+  .contract {
+    background: var(--navy-deep); color: #f1f5f9; border-radius: 10px;
+    padding: 20px 26px; margin: 20px 0; font-size: 12.5pt; line-height: 1.5;
+  }
+  .contract .lead { color: #6ee7b7; font-weight: bold; }
+
+  /* ---- Callouts ---- */
+  .callout { border: 1px solid var(--line); border-left: 5px solid var(--emerald); background: var(--wash); border-radius: 8px; padding: 16px 20px; margin: 14px 0; page-break-inside: avoid; }
+  .callout.cost { border-left-color: var(--crimson); }
+  .callout h4 { margin: 0 0 6px; font-size: 11.5pt; }
+  .callout p:last-child { margin-bottom: 0; }
+
+  /* ---- Tables ---- */
+  table { width: 100%; border-collapse: collapse; margin: 14px 0 20px; font-size: 10pt; page-break-inside: avoid; }
+  th { background: var(--navy); color: #fff; text-align: left; padding: 9px 12px; font-size: 9pt; letter-spacing: .06em; text-transform: uppercase; }
+  td { padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:nth-child(even) td { background: var(--wash); }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  .tier { display: inline-block; font-size: 8.5pt; font-weight: bold; letter-spacing: .05em; padding: 1px 8px; border-radius: 10px; }
+  .tier.hi  { background: #d1fae5; color: #065f46; }
+  .tier.med { background: #fef3c7; color: #92400e; }
+  .tier.lo  { background: #e2e8f0; color: #475569; }
+
+  .footer-note { font-size: 9pt; color: var(--muted); border-top: 1px solid var(--line); margin-top: 36px; padding-top: 14px; }
+
+  /* ---- Print pagination ---- */
+  @media print {
+    body { background: #fff; font-size: 10.5pt; }
+    .page-wrap { max-width: none; box-shadow: none; padding: 0; }
+    .cover { min-height: auto; padding: 140px 0 0; page-break-after: always; }
+    .section { page-break-before: always; }
+    a { color: inherit; text-decoration: none; }
+    @page { margin: 20mm 18mm; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ==================== 1. COVER PAGE ==================== -->
+<div class="cover">
+  <div>
+    <div class="brand">kitUP · Growth &amp; User Acquisition</div>
+    <h1>The UA Command Center</h1>
+    <p class="subtitle">Automated Decision Infrastructure for Paid Growth — a case study in data integrity, statistical discipline, and capital allocation strategy.</p>
+    <div class="cover-accent"></div>
+  </div>
+  <div class="cover-meta">
+    <div><span>Prepared for</span>Growth &amp; UA Leadership Team, kitUP</div>
+    <div><span>Submission date</span>July 2026</div>
+    <div><span>Scope</span>Part 1 — UA Insight &amp; Command Dashboard<br>Part 3 — AI Co-Pilot Working Process</div>
+    <div><span>Out of scope</span>Part 2 — Creative Content Analysis<br><em>(moved to a separate application)</em></div>
+  </div>
+</div>
+
+<div class="page-wrap">
+
+<!-- ==================== 2. EXECUTIVE SUMMARY ==================== -->
+<div>
+  <div class="kicker">Executive Summary</div>
+  <h2>From Spreadsheet Ritual to Deterministic Decision Infrastructure</h2>
+  <hr class="section-rule">
+
+  <p>Every quarter, growth teams burn their most expensive hours on the same ritual: exporting platform data, wrestling it into spreadsheets, arguing about which rows to trust, and negotiating budget splits from gut feel dressed up as analysis. The output quality depends entirely on who did the work, how tired they were, and which anomalies they happened to notice.</p>
+
+  <p>This project replaces that ritual with <strong>deterministic decision infrastructure</strong>. The UA Command Center is a browser-based engine that ingests a raw quarterly campaign export and — with zero human intervention — audits the data, quantifies signal trustworthiness, surfaces the judgments a senior UA manager would make, and produces a fully-reasoned <strong>$50,000/month</strong> budget allocation with pre-committed course-correction tripwires.</p>
+
+  <div class="contract">
+    <span class="lead">The design contract:</span> same schema in → same elite quality of UA judgment out. Every quarter. No spreadsheets. No human error. No dependence on who's at the keyboard.
+  </div>
+
+  <p>Every threshold that constitutes "judgment" — what makes a signal trustworthy, when a campaign earns scaling, where demand capture must stop, when a budget sliver becomes waste — is codified in a single, documented configuration block. The institution's UA logic now lives in reviewable code, not in any individual's head. When Q2's export lands, the machine re-derives every verdict in under a second, and the team's time shifts from <em>producing</em> the analysis to <em>challenging</em> it.</p>
+
+  <p>Proof of the standard, on real Q1 data: the system independently isolated a <span class="neg">$10,149 tracking outage</span> as a financial write-off, quarantined <strong>78 rows</strong> of corrupted cohort data before they could poison LTV math, identified our largest-volume campaign as a vanity-CPI trap and cut its entire <span class="neg">$38K/month to $0</span> — while pinning our highest-ROAS campaigns at their structural ceilings rather than naively scaling them, landing on a plan with a <span class="pos">137.4% projected D30 ROAS</span>.</p>
+</div>
+
+<!-- ==================== 3. PART 1 ==================== -->
+<div class="section">
+  <div class="kicker">Part 1 · Growth Intelligence</div>
+  <h2>The UA Insight &amp; Command Dashboard</h2>
+  <hr class="section-rule">
+
+  <h3>1.1 Architecture from a Business Standpoint</h3>
+  <p>The entire system is <strong>one HTML file, zero backend</strong>. This is not an engineering shortcut — it is a deliberate operating decision with three commercial consequences:</p>
+
+  <table>
+    <tr><th style="width:28%">Property</th><th>Business Impact</th></tr>
+    <tr><td><strong>Total data privacy</strong></td><td>Spend, revenue, and cohort economics are processed entirely in the local browser. Financial data never touches a server, a vendor, or a network. There is no data processing agreement to negotiate because there is no data transfer.</td></tr>
+    <tr><td><strong>Zero onboarding friction</strong></td><td>Any stakeholder — CMO, finance partner, new UA hire — opens the file, drops the CSV, and has the full quarterly read in seconds. No accounts, no BI licenses, no IT tickets, no training.</td></tr>
+    <tr><td><strong>Instant, repeatable processing</strong></td><td>5,000+ rows are parsed, audited, aggregated, and converted into an allocation plan in under a second, identically on every upload. The marginal cost of re-running the entire quarterly analysis is zero.</td></tr>
+  </table>
+
+  <h3>1.2 The Programmatic Data Audit Layer</h3>
+  <p><strong>Principle: never trust the export.</strong> Platform data is a hostile witness — it double-counts, drops attribution, and restates history. The dashboard runs <strong>twelve cleaning rules</strong> on every upload, and every rule reports publicly in an Audit Log — including the rules that caught nothing. The team sees exactly what was excluded, adjusted, or projected, and why. Nothing is silently "fixed." Two interventions from Q1 demonstrate the standard of care:</p>
+
+  <div class="callout cost">
+    <h4>The <span class="neg">$10,149</span> TikTok tracking outage — a write-off, not a performance signal</h4>
+    <p>Forty-two rows (TikTok_VVO_Cold, Feb 10–16 — a contiguous cluster, the fingerprint of a postback outage rather than random loss) showed real spend with exactly zero recorded installs. The naive treatments are both wrong: leave the rows in and the campaign's CPI and ROAS are punished for a <em>measurement</em> failure; delete them and $10,149 of real money vanishes from the books. The system does neither. The spend is preserved as a <strong>"Wasted/Outage Spend"</strong> line in the financial ledger — visible on the topline — while the rows are excluded from every rate metric. Measurement failures are accounted for as costs; they are never allowed to masquerade as performance.</p>
+  </div>
+
+  <div class="callout">
+    <h4>78 rows of impossible retention curves — quarantined before they touch LTV math</h4>
+    <p>Retention is a survival curve; it can only decay (D1 ≥ D7 ≥ D30). The audit layer flagged <strong>78 rows</strong> — concentrated in TikTok — where D30 retention <em>exceeded</em> D7: physically impossible, and proof the cohort tracking is corrupt. These rows keep their spend and install counts (the ad-platform side is intact) but are surgically excluded from retention averages, from the D30/D7 revenue-projection multiplier, and from projected ROAS. This is the difference between a dashboard and decision infrastructure: <strong>we refuse to build revenue models on cohorts we know are broken.</strong></p>
+  </div>
+
+  <p>The same layer deduplicated 26 replayed export rows, ledgered 12 negative-spend refund credits (~$1,579), floored 5 impossible revenue regressions, and ignores the platform's pre-computed CPI column entirely — every rate metric is recomputed from raw counts.</p>
+
+  <p><strong>Cohort maturity, handled honestly.</strong> 1,661 rows (all of March) were missing D30 revenue for the only legitimate reason: those cohorts were too young to have any. Dropping them would erase the newest month; trusting blanks would zero out real revenue. Instead, matured cohorts revealed a remarkably stable D30/D7 revenue multiplier (<span class="pos">2.22×</span>), which projects the immature tail — labeled as a projection everywhere it appears, with a scheduled Day-60 validation against reality.</p>
+
+  <h3>1.3 Performance Views &amp; Statistical Guardrails</h3>
+  <p>Performance is presented at three altitudes — channel, campaign, adset — color-coded against explicit targets (D30 ROAS breakeven at 100%, CPI ≤ $2.50, CTR ≥ 2%, D7 retention ≥ 12%). More importantly, <strong>every entity carries a statistical confidence tier</strong> derived from its volume (margin of error ≈ 1.96/√installs):</p>
+
+  <table>
+    <tr><th style="width:18%">Tier</th><th style="width:34%">Qualification</th><th>Decision Rights</th></tr>
+    <tr><td><span class="tier hi">HIGH</span></td><td>≥ $2K spend, ±10% margin of error</td><td>Decision-grade: can be scaled or killed on its own numbers.</td></tr>
+    <tr><td><span class="tier med">MEDIUM</span></td><td>≥ $500 spend, ±20% margin of error</td><td>Directional only.</td></tr>
+    <tr><td><span class="tier lo">LOW</span></td><td>Anything weaker</td><td>Never scaled, never permanently killed on its own data — it simply loses budget priority.</td></tr>
+  </table>
+
+  <p>This guardrail exists because the most expensive mistakes in UA are made chasing high-variance, low-sample numbers — the adset that ran 40% ROAS on $180 of spend. The dashboard makes that trap structurally impossible: the allocator refuses to act on LOW-confidence signals, and every quoted average carries its sample size. The system also flags what it <em>cannot</em> normalize: our four channels report on three different attribution windows (7d-click/1d-view, 30d-click, 1d-tap), so cross-channel ROAS gaps under ~20% are labeled measurement noise, not performance.</p>
+
+  <h3>1.4 Deterministic Budget Optimization: The $50K/Month Two-Stage Allocator</h3>
+  <p>The allocation engine encodes a truth most optimizers miss: <strong>not all ROAS is created equal.</strong></p>
+
+  <p><strong>Stage 1 — Demand Capture is funded first, and capped hard.</strong> Brand and retargeting campaigns post spectacular ROAS — Google_Search_Brand at <span class="pos">479%</span> projected D30, Meta_Retargeting at <span class="pos">286%</span> — precisely <em>because</em> they harvest demand created elsewhere: organic brand queries and the retargeting pool that prospecting fills. That inventory is structurally bounded. A naive ROAS-maximizer would pour the budget here and watch marginal returns collapse into broad-match queries and stale audience segments. Our allocator funds each to <strong>full historical coverage and not one dollar more</strong>: Meta_Retargeting $7,618/mo, Google_Search_Brand $4,897/mo, ASA_Brand $2,932/mo. Ceilings rise only on evidence the pool itself grew.</p>
+
+  <p><strong>Stage 2 — Every remaining dollar flows to Prospecting by projected D30 ROAS.</strong> The residual $34,553/mo water-fills the demand-<em>creating</em> campaigns proportional to projected D30 ROAS, within per-verdict caps (scaling capped at 2× historical to avoid the auction-efficiency cliff; reduced campaigns at 0.5×). Prospecting is deliberately privileged as a class: it is the top of the funnel that keeps both the brand-search volume and the retargeting pool alive.</p>
+
+  <p><strong>The pruning loop — no budget confetti.</strong> Any surviving allocation below <span class="neg">$2,000/month is converted to CUT</span> and redistributed. A $900/month line item can't buy statistically usable signal; it is fragmentation wearing a diversification costume. The loop reruns until every funded campaign has a viable test budget.</p>
+
+  <div class="callout cost">
+    <h4>The kill that funds the plan</h4>
+    <p>TikTok_VVO_Cold — our single largest line at $38K/month — was cut to <span class="neg">$0</span>. The vanity-CPI trap in full: the portfolio's cheapest installs ($0.43 CPI, 266K installs) with 4.4% D7 retention and 18.5% projected D30 ROAS. Cheap tourists, not users. Critically, the outage cleanup <em>improved</em> this campaign's measured metrics before the verdict — the system killed it on fundamentals, fairly measured, which makes the decision defensible in any room.</p>
+  </div>
+
+  <h3>1.5 The 30/60/90-Day Operational Tripwires</h3>
+  <p>The plan admits, in advance, exactly where it could be wrong — and pre-commits the response:</p>
+
+  <table>
+    <tr><th style="width:16%">Checkpoint</th><th>Pre-Committed Trigger</th></tr>
+    <tr><td><strong>Day 30</strong></td><td>Per-campaign guardrails computed from current metrics: revisit any line whose CPI drifts &gt;1.25× or whose D7 ROAS falls below 0.8× of its Q1 baseline on ≥50% of month-1 spend. For demand capture, rising CPI at flat budget = pool saturation → trim, don't chase. Plan-level: blended D7 ROAS below ~49.8% (vs <span class="pos">62.3%</span> expected) forces an immediate re-run, not a quarter-end postmortem. Any spend day with zero recorded installs escalates to the MMP within 48 hours.</td></tr>
+    <tr><td><strong>Day 60</strong></td><td>Month-1 cohorts are now D30-mature: validate the 2.22× projection multiplier against reality. Outside ±20%, every projected verdict inherits the error — reclassify with the corrected curve. Demand-capture caps rise only on impression-share-lost-to-budget evidence, in ≤15% steps.</td></tr>
+    <tr><td><strong>Day 90</strong></td><td>Full replan: drop the new quarter's CSV in; every verdict re-derives. CUT campaigns may re-enter only through a $2,000–$5,000/mo test cell with a fixed creative hypothesis — never at legacy budgets.</td></tr>
+  </table>
+</div>
+
+<!-- ==================== 4. REGRESSION TABLE ==================== -->
+<div class="section">
+  <div class="kicker">Empirical Verification</div>
+  <h2>The Q1 Regression Table: Proof of Mathematical Reliability</h2>
+  <hr class="section-rule">
+
+  <p>Every output below was verified end-to-end in a live browser against the actual Q1 export. This table is the standing acceptance test — any future modification to the system must reproduce it exactly.</p>
+
+  <table>
+    <tr><th style="width:46%">Verification Check</th><th>Result</th></tr>
+    <tr><td>Raw → clean rows</td><td class="num">5,156 → <strong>5,076</strong> (every removal itemized in the Audit Log)</td></tr>
+    <tr><td>Tracking outage isolated</td><td class="num"><span class="neg">42 rows / $10,149</span> — ledgered as wasted spend, excluded from rates</td></tr>
+    <tr><td>Corrupt retention curves quarantined</td><td class="num"><strong>78 rows</strong> (post-outage), excluded from all cohort math</td></tr>
+    <tr><td>Duplicates / refund credits / revenue regressions</td><td class="num">26 rows / 12 rows (~$1,579) / 5 rows</td></tr>
+    <tr><td>Immature cohorts projected</td><td class="num">1,661 rows at a <span class="pos">2.22×</span> matured D30/D7 multiplier</td></tr>
+    <tr><td>Vanity-CPI trap identified &amp; killed</td><td class="num">TikTok_VVO_Cold: $0.43 CPI, 4.4% D7 ret., 18.5% proj. D30 ROAS → <span class="neg">$38,096/mo cut to $0</span></td></tr>
+    <tr><td>Demand capture pinned at structural ceilings</td><td class="num">$7,618 + $4,897 + $2,932 = <strong>$15,447/mo</strong></td></tr>
+    <tr><td>Prospecting water-fill (by projected D30 ROAS)</td><td class="num">$7,303 · $5,411 · $4,744 · $4,636 · $4,423 · $4,421 · $3,615</td></tr>
+    <tr><td>Total allocation</td><td class="num"><span class="pos">exactly $50,000/mo</span></td></tr>
+    <tr><td>Plan expectation</td><td class="num">Blended D7 ROAS <span class="pos">62.3%</span> · projected D30 ROAS <span class="pos">137.4%</span> vs 100% breakeven</td></tr>
+  </table>
+
+  <p>One honest footnote: the expected-ROAS figures <em>fell</em> versus the naive single-stage allocator's projection (102% D7 / 225% D30). That is the cost of refusing to pretend brand search scales linearly — and it is the difference between a forecast built to impress and a forecast built to be hit.</p>
+</div>
+
+<!-- ==================== 5. PART 3 ==================== -->
+<div class="section">
+  <div class="kicker">Part 3 · AI Working Process</div>
+  <h2>Reverse-Engineering the AI Co-Pilot Workflow</h2>
+  <hr class="section-rule">
+
+  <h3>3.1 The Dynamic: Chief Architect + Agile Execution Engine</h3>
+  <p>This system was built in a single working session using Claude Code — but the operating model matters more than the speed. The human operated as <strong>Chief Architect</strong>: setting the decision framework, supplying the domain physics of UA, and auditing every judgment the machine encoded. The AI operated as an <strong>Agile Execution Engine</strong>: profiling raw data before writing a line of logic, implementing the pipeline, self-verifying in a live browser, and returning proof rather than promises.</p>
+  <p>The velocity gain was real — institutional-grade decision infrastructure in hours, not sprints. But the quality gain came from the <em>loop</em>: every human correction was immediately codified into permanent, testable rules. Senior judgment stopped being advice and became infrastructure.</p>
+
+  <h3>3.2 Critical Human Guardrails: Where Domain Knowledge Overrode the Machine</h3>
+
+  <div class="callout">
+    <h4>1 · Tracking outages are write-offs, not deletions</h4>
+    <p>The baseline engineering instinct for "spend with zero installs" is to drop the rows as dirty data. The senior override: that is $10,149 of real money — deleting it falsifies the books, while keeping it defames the campaign. The taught rule — <em>preserve as a financial ledger line, exclude from rate metrics, and read date-contiguity as outage evidence</em> — is a UA controller's instinct that no general-purpose model defaults to.</p>
+  </div>
+
+  <div class="callout">
+    <h4>2 · Monotonicity as a hard data law</h4>
+    <p>The human mandate: retention curves that rise over time are corrupt, and corrupted cohorts must never feed LTV projections — even when the row's spend data is fine. Notably, the collaboration sharpened the rule in both directions: the human specified "D7 &gt; D1" from memory; the AI verified against raw data, found zero such rows, and located the <em>actual</em> violation (D30 &gt; D7, 85 raw rows) — then implemented the general law covering every inversion. Human principle, machine precision. Neither alone gets it right.</p>
+  </div>
+
+  <div class="callout">
+    <h4>3 · Demand capture does not scale — no matter what the ROAS says</h4>
+    <p>The AI's first allocator did what every optimizer does: it saw 479% ROAS on brand search and scaled it 2×. The senior correction is the kind of scar tissue that only comes from having watched brand campaigns saturate: <em>that ROAS is harvested, not created; the inventory is bounded by organic query volume and pool size; cap it at historical volume and push every marginal dollar into demand creation.</em> This single override restructured the entire allocation engine into the two-stage system — and cut the plan's projected ROAS by a third, on purpose, in exchange for a forecast that will survive contact with reality.</p>
+  </div>
+
+  <h3>3.3 Division of Labor: What Stayed Human, What Was Delegated</h3>
+
+  <table>
+    <tr><th style="width:50%">Kept Strictly in Human Hands</th><th>Delegated to the AI</th></tr>
+    <tr><td>Risk thresholds: what ROAS earns scaling, what confidence earns trust, where the kill-line sits</td><td>Data pipeline: parsing, cleaning rules, joins, aggregation math</td></tr>
+    <tr><td>Growth-model heuristics: demand capture vs. prospecting, pool-saturation logic, payback-curve assumptions</td><td>Statistical mechanics: confidence intervals, weighted aggregates, projection multipliers</td></tr>
+    <tr><td>The meaning of anomalies: outage vs. collapse, refund vs. loss, immature vs. missing</td><td>Verification: live-browser regression testing of every output against the raw file</td></tr>
+    <tr><td>Final accountability for the $50K/month</td><td>UI and visualization: tables, charts, audit-log presentation</td></tr>
+  </table>
+
+  <p>The principle behind the split: <strong>the machine executes judgment; it does not originate it.</strong> Strategic thresholds encode risk appetite and market scar tissue — they are accountability decisions, and accountability cannot be delegated. What <em>can</em> be delegated is everything that must be done perfectly and identically ten thousand times: the parsing, the math, the checks, the rendering. The result is a system where the growth leader's judgment is applied with machine consistency — and where every quarter, the machine hands back the one thing spreadsheets never could: time to think.</p>
+
+  <div class="footer-note">
+    Submitted as the Part 1 + Part 3 case study for the kitUP Growth &amp; UA Leadership review. The dashboard (single <code>index.html</code>) and this document constitute the full deliverable; the Q1 regression table serves as the standing acceptance test for any future modification. — <em>Prepared with the UA Command Center project team, July 2026.</em>
+  </div>
+</div>
+
+</div><!-- /page-wrap -->
+</body>
+</html>
