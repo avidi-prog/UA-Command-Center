@@ -3,7 +3,7 @@
 This repository contains the complete submission for the **User Acquisition Specialist Case Study (Part 1 & Part 3)**.
 
 ## 🚀 Live Demo & Reports
-* **Live Interactive Dashboard:** [👉 Click Here to Test the Application](https://kullanici-adiniz.github.io/kitup-ua-command-center/) *(Drop your Q1 CSV to test re-deriving all judgments instantly)*
+* **Live Interactive Dashboard:** [👉 Click Here to Test the Application](https://avidi-prog.github.io/UA-Command-Center/) *(Drop your Q1 CSV to test re-deriving all judgments instantly)*
 * **Executive Presentation (HTML/PDF):** Open the `CASE_STUDY_SUBMISSION.html` in your browser and use *File -> Print -> Save as PDF* (ensure "Background graphics" is enabled) to view the formatted boardroom-ready report.
 
 ## 📂 Repository Contents
